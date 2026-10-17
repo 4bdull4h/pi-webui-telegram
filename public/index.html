@@ -41,7 +41,16 @@
 
         <div class="sidebar-section">
           <div class="sidebar-title">المحادثات</div>
+          <div class="sess-switch" role="tablist" aria-label="مصدر المحادثات">
+            <button class="sess-switch-btn active" id="sessScopeUi" role="tab" aria-selected="true">هذه الواجهة</button>
+            <button class="sess-switch-btn" id="sessScopeDisk" role="tab" aria-selected="false">الطرفية</button>
+          </div>
+          <div class="sess-tools" id="sessDiskTools" hidden>
+            <input class="sess-search" id="sessDiskSearch" type="search" placeholder="بحث في جلسات الطرفية…" aria-label="بحث في جلسات الطرفية" />
+            <span class="sess-count" id="sessDiskCount"></span>
+          </div>
           <div class="sessions" id="sessions"></div>
+          <div class="sessions" id="sessionsDisk" hidden></div>
         </div>
 
         <div class="sidebar-footer">

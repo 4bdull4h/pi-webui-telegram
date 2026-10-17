@@ -8,6 +8,7 @@ import config from "./config.js";
 import logger from "./logger.js";
 import { RPC_PASSTHROUGH_COMMANDS } from "./rpc/shared.js";
 import { describeExtensionUI } from "./rpc/events.js";
+import { isSessionFileInsideAgent, listDiskSessions, trashSessionFile } from "./rpc/sessions.js";
 import {
   KNOWN_APIS,
   PERMISSIONS,
@@ -976,9 +977,18 @@ export class WebServer {
           case "new_session":
             await conversation.newSession();
             break;
-          case "switch_session":
+          case "switch_session": {
+            // B4a: عند الفتح من تبويب «الطرفية» نتحقق أن المسار ملف جلسة حقيقي داخل مجلد الجلسات.
+            if (msg.fromDisk) {
+              if (!isSessionFileInsideAgent(msg.sessionFile, config.agentDir)) {
+                send({ type: "error", message: "ملف الجلسة غير صالح أو غير موجود." });
+                break;
+              }
+              send({ type: "notice", message: `📂 جارٍ فتح جلسة الطرفية: ${String(msg.sessionFile).split("/").pop()}` });
+            }
             await conversation.switchSession(msg.sessionFile);
             break;
+          }
           case "set_model": {
             const result = await conversation.setModel(msg.provider, msg.model);
             send({ type: "state", state: conversation.getState() });
@@ -1026,6 +1036,32 @@ export class WebServer {
           case "list_sessions":
             send({ type: "sessions", sessions: this.manager.listConversations() });
             break;
+          // ===== B4a: جلسات pi الموجودة على القرص (الطرفية) — منفصلة عن list_sessions =====
+          case "disk_sessions": {
+            try {
+              const result = await listDiskSessions({
+                agentDir: config.agentDir,
+                query: msg.q || "",
+                limit: Number.isFinite(msg.limit) ? msg.limit : undefined,
+              });
+              send({ type: "disk_sessions", ...result });
+            } catch (err) {
+              logger.warn("ويب: فشل قراءة جلسات القرص:", err?.message || err);
+              send({ type: "disk_sessions", sessions: [], total: 0, matched: 0, error: err?.message || String(err) });
+            }
+            break;
+          }
+          case "disk_session_trash": {
+            try {
+              const result = await trashSessionFile(msg.sessionFile, { agentDir: config.agentDir });
+              logger.info("ويب: نقل جلسة طرفية إلى المهملات", { to: result.to });
+              send({ type: "notice", message: "🗑️ نُقلت الجلسة إلى سلة المهملات." });
+              send({ type: "disk_session_trashed", ...result });
+            } catch (err) {
+              send({ type: "disk_session_trash_error", message: err?.message || String(err) });
+            }
+            break;
+          }
           case "get_transcript": {
             const transcript = conversation.refreshTranscript
               ? await conversation.refreshTranscript()

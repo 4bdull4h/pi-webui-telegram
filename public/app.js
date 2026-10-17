@@ -11,6 +11,12 @@ const els = {
   sidebarClose: $("#sidebarClose"),
   menuBtn: $("#menuBtn"),
   sessions: $("#sessions"),
+  sessionsDisk: $("#sessionsDisk"),
+  sessScopeUi: $("#sessScopeUi"),
+  sessScopeDisk: $("#sessScopeDisk"),
+  sessDiskTools: $("#sessDiskTools"),
+  sessDiskSearch: $("#sessDiskSearch"),
+  sessDiskCount: $("#sessDiskCount"),
   newSessionBtn: $("#newSessionBtn"),
   agentSelect: $("#agentSelect"),
   agentBadge: $("#agentBadge"),
@@ -133,6 +139,12 @@ const state = {
   connected: false,
   models: [],
   sessions: [],
+  sessScope: "ui", // "ui" | "disk" (B4a)
+  diskSessions: [],
+  diskQuery: "",
+  diskMeta: { total: 0, matched: 0, error: null },
+  diskLoading: false,
+  diskFetched: false,
   agents: [],
   agent: null,
   skills: [],
@@ -1012,6 +1024,10 @@ function applyState(next) {
 }
 
 function renderSessions() {
+  if (state.sessScope === "disk") {
+    renderDiskSessions();
+    return;
+  }
   els.sessions.innerHTML = "";
   if (!state.sessions.length) {
     els.sessions.innerHTML = `<div class="s-meta" style="padding:8px">لا توجد محادثات محفوظة بعد.</div>`;
@@ -1036,6 +1052,204 @@ function renderSessions() {
     });
     els.sessions.appendChild(btn);
   }
+}
+
+// ===== B4a: تبويب «الطرفية» — جلسات pi الموجودة على القرص =====
+
+const SESS_SCOPE_STORAGE = "piui.sessScope";
+
+function setSessScope(scope, options = {}) {
+  state.sessScope = scope === "disk" ? "disk" : "ui";
+  try {
+    localStorage.setItem(SESS_SCOPE_STORAGE, state.sessScope);
+  } catch {
+    /* ignore */
+  }
+  const isDisk = state.sessScope === "disk";
+  els.sessScopeUi?.classList.toggle("active", !isDisk);
+  els.sessScopeDisk?.classList.toggle("active", isDisk);
+  els.sessScopeUi?.setAttribute("aria-selected", String(!isDisk));
+  els.sessScopeDisk?.setAttribute("aria-selected", String(isDisk));
+  if (els.sessDiskTools) els.sessDiskTools.hidden = !isDisk;
+  if (els.sessions) els.sessions.hidden = isDisk;
+  if (els.sessionsDisk) els.sessionsDisk.hidden = !isDisk;
+  if (isDisk && (options.refresh || !state.diskFetched)) requestDiskSessions();
+  renderSessions();
+}
+
+function requestDiskSessions() {
+  if (state.ws?.readyState !== WebSocket.OPEN) return;
+  state.diskLoading = true;
+  els.sessDiskCount && (els.sessDiskCount.textContent = "…");
+  send({ type: "disk_sessions", q: state.diskQuery });
+}
+
+function fmtAgo(ts) {
+  const diff = Date.now() - Number(ts || 0);
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  const mins = Math.round(diff / 60000);
+  if (mins < 1) return "الآن";
+  if (mins < 60) return `قبل ${mins} د`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `قبل ${hours} س`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `قبل ${days} ي`;
+  return new Date(Number(ts)).toLocaleDateString("ar-EG");
+}
+
+function fmtSize(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderDiskSessions() {
+  const host = els.sessionsDisk;
+  if (!host) return;
+  host.innerHTML = "";
+  if (state.diskLoading && !state.diskSessions.length) {
+    host.innerHTML = `<div class="s-meta" style="padding:8px">جارٍ قراءة جلسات الطرفية…</div>`;
+    return;
+  }
+  if (state.diskMeta?.error) {
+    host.innerHTML = `<div class="s-meta" style="padding:8px">تعذّر قراءة الجلسات: ${escapeHtml(state.diskMeta.error)}</div>`;
+    return;
+  }
+  if (!state.diskSessions.length) {
+    host.innerHTML = `<div class="s-meta" style="padding:8px">${
+      state.diskQuery ? "لا نتائج مطابقة للبحث." : "لا توجد جلسات طرفية على القرص."
+    }</div>`;
+    return;
+  }
+  for (const session of state.diskSessions) {
+    const row = document.createElement("div");
+    row.className = "disk-row";
+
+    const btn = document.createElement("button");
+    btn.className = "session-item";
+    btn.title = session.sessionFile;
+    const isActive = !!session.sessionFile && session.sessionFile === state.current?.sessionFile;
+    btn.classList.toggle("active", isActive);
+    const label = session.title || `جلسة ${String(session.id || "").slice(0, 8)}`;
+    const bits = [
+      session.projectName ? escapeHtml(session.projectName) : "",
+      `${fmtNumber(session.messageCount)} رسالة${session.partial ? "+" : ""}`,
+      fmtAgo(session.updatedAt),
+      fmtSize(session.size),
+    ].filter(Boolean);
+    btn.innerHTML = `
+      <span class="s-title" dir="auto">🖥️ ${escapeHtml(label)}</span>
+      <span class="s-meta" dir="auto">${bits.join(" · ")}</span>`;
+    btn.addEventListener("click", () => openDiskSession(session));
+    row.appendChild(btn);
+
+    const more = document.createElement("button");
+    more.className = "disk-more";
+    more.type = "button";
+    more.title = "خيارات";
+    more.setAttribute("aria-label", "خيارات الجلسة");
+    more.textContent = "⋯";
+    more.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDiskSessionMenu(more, session);
+    });
+    row.appendChild(more);
+
+    host.appendChild(row);
+  }
+}
+
+function closeDiskMenu() {
+  document.querySelectorAll(".sess-menu").forEach((node) => node.remove());
+}
+
+function openDiskSessionMenu(anchor, session) {
+  closeDiskMenu();
+  const menu = document.createElement("div");
+  menu.className = "sess-menu";
+  menu.innerHTML = `
+    <button type="button" data-act="open">📂 فتح</button>
+    <button type="button" data-act="rename">✏️ إعادة تسمية</button>
+    <button type="button" data-act="delete">🗑️ حذف (إلى المهملات)</button>`;
+  document.body.appendChild(menu);
+  const rect = anchor.getBoundingClientRect();
+  const top = Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 4);
+  const left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, rect.right - menu.offsetWidth));
+  menu.style.top = `${Math.max(8, top)}px`;
+  menu.style.left = `${left}px`;
+  menu.addEventListener("click", (event) => {
+    const act = event.target?.closest?.("button")?.dataset?.act;
+    if (!act) return;
+    closeDiskMenu();
+    if (act === "open") openDiskSession(session);
+    else if (act === "rename") renameDiskSession(session);
+    else if (act === "delete") deleteDiskSession(session);
+  });
+  setTimeout(() => {
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (!menu.contains(event.target)) closeDiskMenu();
+      },
+      { once: true },
+    );
+  }, 0);
+}
+
+function openDiskSession(session, options = {}) {
+  if (!session?.sessionFile) return;
+  if (state.current?.isStreaming && !options.force) {
+    toast("لا يمكن فتح جلسة أخرى أثناء توليد رد. أوقف أولاً.", "error");
+    return;
+  }
+  send({ type: "switch_session", sessionFile: session.sessionFile, fromDisk: true });
+  if (!options.silent) toast(`📂 فتح جلسة طرفية: ${session.title || session.id}`, "ok");
+}
+
+function waitForSessionFile(sessionFile, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const current = state.current?.sessionFile;
+      if (current === sessionFile || Date.now() - started > timeoutMs) {
+        clearInterval(timer);
+        resolve(current === sessionFile);
+      }
+    }, 150);
+  });
+}
+
+async function renameDiskSession(session) {
+  const next = window.prompt("الاسم الجديد للجلسة:", session.title || "");
+  if (next === null) return;
+  const name = next.trim();
+  if (!name) {
+    toast("الاسم فارغ — لم يتم التغيير.", "error");
+    return;
+  }
+  openDiskSession(session, { silent: true });
+  const ready = await waitForSessionFile(session.sessionFile);
+  if (!ready) {
+    toast("تعذّر فتح الجلسة لإعادة تسميتها.", "error");
+    return;
+  }
+  try {
+    await rpcCall("set_session_name", { name });
+    session.title = name;
+    session.name = name;
+    toast(`✏️ تمت إعادة التسمية إلى «${name}».`, "ok");
+    requestDiskSessions();
+    renderDiskSessions();
+  } catch (err) {
+    toast(`فشل إعادة التسمية: ${err?.message || err}`, "error");
+  }
+}
+
+function deleteDiskSession(session) {
+  const label = session.title || session.id;
+  if (!window.confirm(`نقل الجلسة «${label}» إلى سلة المهملات (${".trash"})؟`)) return;
+  send({ type: "disk_session_trash", sessionFile: session.sessionFile });
 }
 
 const ROLE_LABELS = {
@@ -1464,6 +1678,9 @@ function handleServerMessage(message) {
       else if (message.state?.agent) applyAgent(message.state.agent);
       populateModels();
       populateAgents();
+      // B4a: بعد (إعادة) الاتصال نُبطل كاش جلسات الطرفية ونحدّثها إن كان تبويبها مفتوحاً.
+      state.diskFetched = false;
+      if (state.sessScope === "disk") requestDiskSessions();
       renderSessions();
       renderUsage();
       els.messages.innerHTML = "";
@@ -1503,6 +1720,31 @@ function handleServerMessage(message) {
     case "sessions":
       state.sessions = message.sessions || [];
       renderSessions();
+      break;
+    // ===== B4a: جلسات الطرفية على القرص =====
+    case "disk_sessions":
+      state.diskLoading = false;
+      state.diskFetched = true;
+      state.diskSessions = message.sessions || [];
+      state.diskMeta = {
+        total: message.total ?? state.diskSessions.length,
+        matched: message.matched ?? state.diskSessions.length,
+        error: message.error || null,
+      };
+      if (els.sessDiskCount) {
+        els.sessDiskCount.textContent = state.diskQuery
+          ? `${state.diskMeta.matched}/${state.diskMeta.total}`
+          : `${state.diskMeta.total}`;
+      }
+      renderDiskSessions();
+      break;
+    case "disk_session_trashed":
+      toast("🗑️ نُقلت الجلسة إلى سلة المهملات.", "success");
+      state.diskFetched = false;
+      if (state.sessScope === "disk") requestDiskSessions();
+      break;
+    case "disk_session_trash_error":
+      toast(`تعذّر حذف الجلسة: ${message.message || "خطأ"}`, "error");
       break;
     case "transcript": {
       // يُرسل بعد ready عند تأخر جاهزية الجسر — نطبّقه فقط إن كانت الواجهة فارغة.
@@ -4155,6 +4397,22 @@ function bindUi() {
       toast("♻️ جارٍ إعادة التشغيل… سيُعاد الاتصال تلقائياً.", "success");
     }
   });
+
+  // ===== B4a: تبديل مصدر قائمة المحادثات (هذه الواجهة / الطرفية) + بحث =====
+  let diskSearchTimer = null;
+  els.sessScopeUi?.addEventListener("click", () => setSessScope("ui"));
+  els.sessScopeDisk?.addEventListener("click", () => setSessScope("disk", { refresh: true }));
+  els.sessDiskSearch?.addEventListener("input", () => {
+    state.diskQuery = els.sessDiskSearch.value.trim();
+    clearTimeout(diskSearchTimer);
+    diskSearchTimer = setTimeout(() => requestDiskSessions(), 250);
+  });
+  try {
+    const saved = localStorage.getItem(SESS_SCOPE_STORAGE);
+    if (saved === "disk") setSessScope("disk");
+  } catch {
+    /* ignore */
+  }
 
   els.menuBtn.addEventListener("click", () => els.sidebar.classList.toggle("open"));
   els.sidebarClose.addEventListener("click", () => els.sidebar.classList.remove("open"));

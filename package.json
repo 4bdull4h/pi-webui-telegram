@@ -13,10 +13,11 @@
     "telegram": "node src/index.js --no-web",
     "test:approvals": "node scripts/test-approvals.mjs --self-test",
     "test:telegram-ui": "node scripts/test-telegram-ui.mjs --self-test",
-    "check": "node --check src/index.js && node --check src/web-server.js && node --check src/telegram-bot.js && node --check src/rpc/conversation.js && node --check src/rpc/shared.js && node --check public/app.js",
+    "check": "node --check src/index.js && node --check src/web-server.js && node --check src/telegram-bot.js && node --check src/rpc/conversation.js && node --check src/rpc/shared.js && node --check src/rpc/sessions.js && node --check public/app.js",
     "dev": "node --watch src/index.js",
     "test:attachments": "node scripts/test-attachments.mjs --self-test",
-    "test:rpc-passthrough": "node scripts/test-rpc-passthrough.mjs --self-test"
+    "test:rpc-passthrough": "node scripts/test-rpc-passthrough.mjs --self-test",
+    "test:disk-sessions": "node scripts/test-disk-sessions.mjs --self-test"
   },
   "engines": {
     "node": ">=20"
