@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import config from "./config.js";
 import logger from "./logger.js";
 import { t, thinkingLabel } from "./i18n.js";
@@ -6,6 +8,38 @@ import { toolLabel, toolHint } from "./events.js";
 
 const MODELS_PER_PAGE = 8;
 const SESSIONS_PER_PAGE = 8;
+
+// ===== المرحلة D1: كتم الرسائل حتى النتيجة النهائية =====
+const QUIET_PROGRESS_MS = 45_000; // حدّ أقصى لتعديل رسالة «جارٍ العمل» في وضع final
+const FINAL_TEXT_LIMIT = 3500; // أقصى طول لنص الوكيل في الرسالة النهائية
+const COMPACT_MAX_LINES = 6; // أقصى أسطر التقدّم في وضع compact
+const ERROR_LINE_LIMIT = 500;
+
+/** تنسيق المدة: 1:23 أو 1:02:03. */
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/** وقت محلي HH:MM:SS لرسالة الانقطاع. */
+function formatClock(timestamp) {
+  const d = new Date(Number(timestamp) || Date.now());
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** قصّ HTML دون قطع كيان (&lt; …) في المنتصف. */
+function truncateHtml(html, max) {
+  if (html.length <= max) return html;
+  let cut = html.slice(0, max);
+  const amp = cut.lastIndexOf("&");
+  if (amp > -1 && amp > cut.length - 12 && !cut.slice(amp).includes(";")) cut = cut.slice(0, amp);
+  return `${cut}…`;
+}
 
 class TelegramError extends Error {
   constructor(description, code, payload) {
@@ -86,11 +120,39 @@ export class TelegramBot {
       typingTimer: null,
       ensuring: null,
     };
+    // حالة تشغيل «مكتوم» (وضعا final/compact).
+    this.quiet = {
+      active: false,
+      chatId: null,
+      messageId: null,
+      startedAt: 0,
+      steps: 0,
+      lastText: "",
+      error: null,
+      aborted: false,
+      timer: null,
+      renderTimer: null,
+      lines: [],
+      rendered: "",
+      rendering: false,
+      pendingText: null,
+      lastRenderAt: 0,
+    };
     this.primaryChatId = config.telegram.allowedChats[0] || config.telegram.allowedUsers[0] || null;
   }
 
   get enabled() {
     return config.telegram.enabled && !!config.telegram.token;
+  }
+
+  /** final | compact | live (D1). */
+  get notifyMode() {
+    return config.telegram.notifyMode || "final";
+  }
+
+  /** هل نحن في وضع مكتوم لا يرسل إلا رسالة نهائية؟ */
+  get quietMode() {
+    return this.notifyMode === "final" || this.notifyMode === "compact";
   }
 
   #conversationId(chatId) {
@@ -280,6 +342,8 @@ export class TelegramBot {
 
   async handleSharedEvent(event) {
     if (!config.syncWebTelegram || !config.sharedSessionId) return;
+    // D1: وضعا final/compact يمرّان على المسار المكتوم، وlive يبقى كما هو.
+    if (this.quietMode) return this.handleQuietEvent(event);
     const target = this.mirrorTargetChat();
     switch (event.type) {
       case "user_message": {
@@ -379,6 +443,284 @@ export class TelegramBot {
     }
   }
 
+  // ===== D1: وضع «الرسالة النهائية فقط» / «سطر تقدّم قصير» =====
+
+  runStatePath() {
+    return join(config.dataDir, "run-state.json");
+  }
+
+  /** حفظ حالة التشغيل لتكتشفها الدورة الجديدة عند انقطاع الخادم. */
+  saveRunState() {
+    try {
+      mkdirSync(config.dataDir, { recursive: true });
+      writeFileSync(
+        this.runStatePath(),
+        JSON.stringify(
+          { chatId: this.quiet.chatId, startedAt: this.quiet.startedAt, steps: this.quiet.steps },
+          null,
+          2,
+        ),
+      );
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر حفظ run-state:", err?.message || err);
+    }
+  }
+
+  clearRunState() {
+    try {
+      rmSync(this.runStatePath(), { force: true });
+    } catch {
+      /* تجاهل */
+    }
+  }
+
+  /** عند الإقلاع: إن وُجدت مهمة معلّقة أبلغ مرة واحدة ثم احذف الملف. */
+  async checkInterruptedRun() {
+    let raw;
+    try {
+      raw = readFileSync(this.runStatePath(), "utf8");
+    } catch {
+      return;
+    }
+    let state = null;
+    try {
+      state = JSON.parse(raw);
+    } catch {
+      this.clearRunState();
+      return;
+    }
+    const chatId = String(state?.chatId || this.mirrorTargetChat() || "");
+    this.clearRunState();
+    if (!chatId) return;
+    const text = t(this.lang, "interrupted", {
+      time: formatClock(state?.startedAt),
+      steps: Number(state?.steps) || 0,
+    });
+    await this.api
+      .sendMessage(chatId, text, { parse_mode: "HTML", disable_web_page_preview: true })
+      .catch(() => undefined);
+    logger.warn("تيليجرام: أُبلغ عن مهمة انقطعت سابقاً.");
+  }
+
+  resetQuiet() {
+    const q = this.quiet;
+    if (q.timer) clearInterval(q.timer);
+    if (q.renderTimer) clearTimeout(q.renderTimer);
+    q.active = false;
+    q.chatId = null;
+    q.messageId = null;
+    q.startedAt = 0;
+    q.steps = 0;
+    q.lastText = "";
+    q.error = null;
+    q.aborted = false;
+    q.timer = null;
+    q.renderTimer = null;
+    q.lines = [];
+    q.rendered = "";
+    q.rendering = false;
+    q.pendingText = null;
+    q.lastRenderAt = 0;
+  }
+
+  /** بدء التشغيل: رسالة واحدة فقط «⏳ جارٍ العمل…» مع زر إيقاف. */
+  async startQuietRun(chatId) {
+    this.clearMirrorFinalize();
+    this.stopMirrorTyping();
+    this.resetQuiet();
+    if (!chatId) return false;
+    const q = this.quiet;
+    q.active = true;
+    q.chatId = String(chatId);
+    q.startedAt = Date.now();
+    try {
+      const message = await this.api.sendMessage(q.chatId, t(this.lang, "finalRunning"), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [[{ text: t(this.lang, "btnStop"), callback_data: "stop" }]],
+        },
+      });
+      q.messageId = message?.message_id ?? null;
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر إنشاء رسالة التشغيل:", err?.message || err);
+      q.active = false;
+      q.chatId = null;
+      return false;
+    }
+    this.saveRunState();
+    // في وضع final: تعديل واحد كل 45 ثانية لإظهار المدة فقط.
+    q.timer = setInterval(() => {
+      this.quietTick().catch(() => undefined);
+    }, QUIET_PROGRESS_MS);
+    q.timer.unref?.();
+    return true;
+  }
+
+  async quietTick() {
+    const q = this.quiet;
+    if (!q.active || !q.messageId) return;
+    if (this.notifyMode !== "final") return;
+    const elapsed = formatDuration(Date.now() - q.startedAt);
+    await this.renderQuiet(t(this.lang, "finalRunningElapsed", { duration: elapsed }));
+  }
+
+  /** تعديل واحد متسلسل (حلقة قصيرة) لرسالة التشغيل. */
+  async renderQuiet(text) {
+    const q = this.quiet;
+    if (!q.active || !q.messageId || !q.chatId) return;
+    q.pendingText = text;
+    if (q.rendering) return;
+    q.rendering = true;
+    try {
+      while (q.active && q.pendingText) {
+        const next = q.pendingText;
+        q.pendingText = null;
+        if (next === q.rendered) continue;
+        q.rendered = next;
+        try {
+          await this.api.editMessageText(q.chatId, q.messageId, next, {
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            reply_markup: {
+              inline_keyboard: [[{ text: t(this.lang, "btnStop"), callback_data: "stop" }]],
+            },
+          });
+        } catch (err) {
+          if (!/not modified/i.test(err?.message || "")) {
+            logger.debug("تيليجرام تعديل التشغيل:", err?.message || err);
+          }
+        }
+      }
+    } finally {
+      q.rendering = false;
+    }
+  }
+
+  compactText() {
+    return this.quiet.lines.slice(-COMPACT_MAX_LINES).join("\n") || t(this.lang, "finalRunning");
+  }
+
+  scheduleCompactRender() {
+    const q = this.quiet;
+    if (!q.active) return;
+    this.saveRunState();
+    // لا نلغي المؤقت المعلّق: عند انتهائه سيقرأ آخر الأسطر (leading + trailing).
+    if (q.renderTimer) return;
+    const wait = Math.max(0, config.telegram.streamThrottleMs - (Date.now() - q.lastRenderAt));
+    q.renderTimer = setTimeout(() => {
+      q.renderTimer = null;
+      q.lastRenderAt = Date.now();
+      this.renderQuiet(this.compactText()).catch(() => undefined);
+    }, wait);
+    q.renderTimer.unref?.();
+  }
+
+  /** معالجة الأحداث في الوضع المكتوم: لا يُرسل شيء حتى settled. */
+  async handleQuietEvent(event) {
+    const q = this.quiet;
+    switch (event.type) {
+      case "run_start":
+        await this.startQuietRun(this.mirrorTargetChat());
+        return;
+      case "tool_start":
+        if (!q.active) return;
+        q.steps += 1;
+        if (this.notifyMode === "compact") {
+          q.lines.push(t(this.lang, "progressStep", { n: q.steps, tool: event.name }));
+          if (q.lines.length > COMPACT_MAX_LINES) q.lines = q.lines.slice(-COMPACT_MAX_LINES);
+          this.scheduleCompactRender();
+        } else {
+          this.saveRunState();
+        }
+        return;
+      case "assistant_message":
+        if (!q.active) return;
+        if (event.errorMessage) q.error = event.errorMessage;
+        else if (event.text) q.lastText = event.text;
+        return;
+      case "error":
+        if (q.active) q.error = event.message || q.error;
+        return;
+      case "retry_end":
+        // خطأ وسيط: يُحتفظ به كسطر واحد فقط يُعرض إن فشلت المهمة.
+        if (q.active && !event.success) q.error = event.finalError || q.error;
+        return;
+      case "settled":
+        await this.finishQuiet(!!event.aborted);
+        return;
+      default:
+        // text_delta / tool_update / retry / compaction_* / user_message … مكتومة.
+        return;
+    }
+  }
+
+  /** عند settled: تعديل نفس الرسالة برسالة نهائية واحدة. */
+  async finishQuiet(aborted) {
+    const q = this.quiet;
+    if (!q.active) {
+      this.clearRunState();
+      return;
+    }
+    const chatId = q.chatId;
+    const messageId = q.messageId;
+    const duration = formatDuration(Date.now() - q.startedAt);
+    const steps = q.steps;
+    const wasAborted = aborted || q.aborted;
+    const error = q.error;
+    const failed = !wasAborted && !!error;
+    const body = (q.lastText || "").trim();
+
+    const header = [
+      `<b>${t(this.lang, wasAborted ? "finalAborted" : failed ? "finalFailed" : "finalDone")}</b>`,
+      `${t(this.lang, "finalDuration")}: <code>${duration}</code> · ${t(this.lang, "finalSteps")}: <code>${steps}</code>`,
+    ];
+    if (failed) {
+      const errText = String(error);
+      const clipped =
+        errText.length > ERROR_LINE_LIMIT ? `${errText.slice(0, ERROR_LINE_LIMIT)}…` : errText;
+      header.push(`${t(this.lang, "finalErrorLine")}: ${escapeHtml(clipped)}`);
+    }
+    let text = header.join("\n");
+    if (body) {
+      const clipped =
+        body.length > FINAL_TEXT_LIMIT
+          ? `${body.slice(0, FINAL_TEXT_LIMIT)}\n… (${t(this.lang, "finalTruncated")})`
+          : body;
+      text += `\n\n${escapeHtml(clipped)}`;
+    }
+    text = truncateHtml(text, config.telegram.maxMessageLength);
+
+    // إعادة تعيين قبل الإرسال: يمنع أي تكرار إن ورد settled آخر.
+    if (q.timer) clearInterval(q.timer);
+    if (q.renderTimer) clearTimeout(q.renderTimer);
+    q.active = false;
+    q.pendingText = null;
+    this.clearRunState();
+
+    if (chatId && messageId) {
+      try {
+        await this.api.editMessageText(chatId, messageId, text, {
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_markup: this.mainKeyboard(),
+        });
+      } catch (err) {
+        if (!/not modified/i.test(err?.message || "")) {
+          // فشل التعديل: إرسال الرسالة النهائية مرة واحدة كحل أخير.
+          await this.api
+            .sendMessage(chatId, text, {
+              parse_mode: "HTML",
+              disable_web_page_preview: true,
+              reply_markup: this.mainKeyboard(),
+            })
+            .catch(() => undefined);
+        }
+      }
+    }
+    this.resetQuiet();
+  }
+
   #isAuthorized(update) {
     const from = update.message?.from || update.callback_query?.from;
     if (!from) return false;
@@ -397,6 +739,8 @@ export class TelegramBot {
     }
     await this.api.getMe().then((me) => logger.ok(`تيليجرام: متصل كـ @${me.username}`));
     this.bindSharedMirror();
+    // D1: watchdog — إن كانت هناك مهمة معلّقة من دورة سابقة أبلغ ثم امسح الملف.
+    await this.checkInterruptedRun().catch(() => undefined);
     await this.api
       .setMyCommands([
         { command: "start", description: "بدء المحادثة" },
@@ -422,6 +766,12 @@ export class TelegramBot {
     this.clearMirrorFinalize();
     this.stopMirrorTyping();
     this.mirror.active = false;
+    // D1: إيقاف مؤقتات الوضع المكتوم.
+    if (this.quiet.timer) clearInterval(this.quiet.timer);
+    if (this.quiet.renderTimer) clearTimeout(this.quiet.renderTimer);
+    this.quiet.timer = null;
+    this.quiet.renderTimer = null;
+    this.quiet.active = false;
   }
 
   async pollLoop() {
@@ -566,6 +916,11 @@ export class TelegramBot {
   async cmdStop(chatId) {
     const conv = this.#conversation(chatId);
     const stopped = await conv.abort();
+    // في وضع الكتم: الرسالة النهائية وحدها تُعلن الإيقاف (لا رسالة إضافية).
+    if (stopped && this.quietMode && this.quiet.active) {
+      this.quiet.aborted = true;
+      return;
+    }
     await this.api.sendMessage(chatId, stopped ? t(this.lang, "aborted") : t(this.lang, "nothingToStop"), {
       parse_mode: "HTML",
     });
@@ -809,15 +1164,25 @@ export class TelegramBot {
     try {
       if (conv.isBusy) {
         await conv.prompt(text, { source: "telegram" });
-        await this.api
-          .sendMessage(chatId, "📨 تم استلام رسالتك وسأتابعها بعد إنهاء المهمة الحالية.")
-          .catch(() => undefined);
+        // في وضع الكتم لا نرسل إشعار «تم استلام رسالتك».
+        if (!this.quietMode) {
+          await this.api
+            .sendMessage(chatId, "📨 تم استلام رسالتك وسأتابعها بعد إنهاء المهمة الحالية.")
+            .catch(() => undefined);
+        }
         return;
       }
       await conv.prompt(text, { source: "telegram" });
     } catch (err) {
+      const message = err?.message || String(err);
+      if (this.quietMode && this.quiet.active) {
+        // في وضع الكتم: الخطأ يُذكر في الرسالة النهائية فقط.
+        this.quiet.error = message;
+        await this.finishQuiet(false);
+        return;
+      }
       await this.api
-        .sendMessage(chatId, `❌ ${escapeHtml(err?.message || String(err))}`, { parse_mode: "HTML" })
+        .sendMessage(chatId, `❌ ${escapeHtml(message)}`, { parse_mode: "HTML" })
         .catch(() => undefined);
     }
   }

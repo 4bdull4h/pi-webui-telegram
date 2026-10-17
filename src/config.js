@@ -43,6 +43,11 @@ const int = (v, fallback) => {
   const n = Number.parseInt(String(v), 10);
   return Number.isFinite(n) ? n : fallback;
 };
+// وضع إشعارات تيليجرام (المرحلة D1): final | compact | live — الافتراضي final.
+const notifyMode = (() => {
+  const raw = String(process.env.TELEGRAM_NOTIFY_MODE ?? "").trim().toLowerCase();
+  return ["final", "compact", "live"].includes(raw) ? raw : "final";
+})();
 const sharedSessionId = process.env.SHARED_SESSION_ID ?? "shared:main";
 const syncWebTelegram = bool(process.env.SYNC_WEB_TELEGRAM, true) && !!sharedSessionId;
 
@@ -81,6 +86,8 @@ export const config = {
     allowedUsers: list(process.env.TELEGRAM_ALLOWED_USERS),
     allowedChats: list(process.env.TELEGRAM_ALLOWED_CHATS),
     streamThrottleMs: int(process.env.TELEGRAM_STREAM_THROTTLE_MS, 1200),
+    // D1: final = رسالة واحدة تُستبدل بالنتيجة النهائية، compact = سطر تقدّم قصير، live = السلوك القديم.
+    notifyMode,
     maxMessageLength: 3900,
     pollTimeout: 30,
   },
@@ -90,6 +97,15 @@ export const config = {
     noSkills: bool(process.env.PI_NO_SKILLS, false),
     tools: list(process.env.PI_TOOLS),
     systemPromptExtra: process.env.PI_SYSTEM_PROMPT_EXTRA || "",
+  },
+
+  // جسر RPC (المرحلة A): معطّل افتراضياً. FEATURE_RPC=1 يفعّله.
+  featureRpc: bool(process.env.FEATURE_RPC, false),
+  rpc: {
+    // معاملات إضافية تُمرّر إلى `pi --mode rpc` (مفصولة بمسافات).
+    extraArgs: String(process.env.PI_RPC_EXTRA_ARGS || "")
+      .split(/\s+/)
+      .filter(Boolean),
   },
 
   maxSessions: int(process.env.MAX_SESSIONS, 60),

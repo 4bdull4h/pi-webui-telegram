@@ -14,15 +14,8 @@ import config from "./config.js";
 import logger from "./logger.js";
 import { AgentRegistry, UsageTracker } from "./control.js";
 import { normalizeEvent, transcriptFromMessages } from "./events.js";
-
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-const SYSTEM_APPEND = `قواعد عامة للمحادثة:
-- أجب دائماً بنفس لغة رسالة المستخدم الأخيرة (العربية هي الافتراضية).
-- كن موجزاً وواضحاً، واستخدم التنسيق (عناوين، قوائم، كتل كود) لتسهيل القراءة.
-- قبل إجراء تغييرات كبيرة على الملفات، اشرح باختصار ما ستفعله ولماذا.
-- عند إكمال المهمة، لخّص النتيجة في سطر أو سطرين.
-- أنت تتحدث عبر واجهة محادثة (ويب/تيليجرام)، فاجعل الردود مناسبة للقراءة السريعة.`;
+import { RpcConversation } from "./rpc/conversation.js";
+import { SYSTEM_APPEND, THINKING_LEVELS, normalizeThinking, safeId } from "./rpc/shared.js";
 
 /** حارس صلاحيات OpenCode: يطبّق خريطة deny حتى في الجلسات الفرعية. */
 function createPermissionGuardExtension() {
@@ -53,14 +46,6 @@ function createPermissionGuardExtension() {
       return undefined;
     });
   };
-}
-
-function normalizeThinking(level) {
-  return THINKING_LEVELS.includes(level) ? level : "medium";
-}
-
-function safeId(id) {
-  return String(id).replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80) || "conversation";
 }
 
 /** محادثة واحدة تملك جلسة Pi واحدة. */
@@ -436,6 +421,7 @@ export class PiManager {
       modelsPath: join(config.agentDir, "models.json"),
     });
     await this.refreshModels();
+    logger.info(`محرّك الجلسات: ${config.featureRpc ? "RPC (FEATURE_RPC=1)" : "SDK (افتراضي)"}`);
     this.#migrateSharedSession();
     try {
       this.usage.seedFromSessions(join(config.dataDir, "sessions"));
@@ -673,7 +659,9 @@ export class PiManager {
   getOrCreate(id) {
     let conversation = this.conversations.get(id);
     if (!conversation) {
-      conversation = new Conversation(id, this);
+      // FEATURE_RPC=1 → جسر RPC، وإلا فالمسار القديم عبر SDK حرفياً.
+      const Impl = config.featureRpc ? RpcConversation : Conversation;
+      conversation = new Impl(id, this);
       this.conversations.set(id, conversation);
       this.#evictIfNeeded();
     }
