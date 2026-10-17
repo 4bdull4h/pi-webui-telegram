@@ -7,6 +7,7 @@ import { WebSocketServer } from "ws";
 import config from "./config.js";
 import logger from "./logger.js";
 import { RPC_PASSTHROUGH_COMMANDS } from "./rpc/shared.js";
+import { describeExtensionUI } from "./rpc/events.js";
 import {
   KNOWN_APIS,
   PERMISSIONS,
@@ -911,6 +912,26 @@ export class WebServer {
         syncWebTelegram: config.syncWebTelegram,
       });
 
+      // إعادة عرض أي حوار موافقة معلّق (مثلاً: فُتحت الصفحة بعد صدور الطلب).
+      try {
+        const pendingRequests = conversation.getPendingExtensionUI?.() || [];
+        for (const raw of pendingRequests) {
+          const normalized = describeExtensionUI(raw);
+          if (!normalized?.expectsResponse) continue;
+          if (existing.pendingUI?.has(normalized.requestId)) continue;
+          send({ type: "extension_ui", conversationId: id, request: extensionUiRequest(normalized) });
+          if (normalized.requestId) existing.pendingUI?.add(normalized.requestId);
+        }
+        if (pendingRequests.length) {
+          logger.info("ويب: إعادة عرض حوار معلّق", {
+            conversationId: id,
+            count: pendingRequests.length,
+          });
+        }
+      } catch (err) {
+        logger.debug("ويب: تعذّر جلب الحوارات المعلّقة:", err?.message || err);
+      }
+
       // قد يسبق أول get_messages جاهزية جسر RPC فيعود السجل فارغاً؛
       // نعيد جلبه بعد لحظة ونرسله إن لم يكن قد وصل.
       if (!transcript.length) {
@@ -1108,15 +1129,15 @@ export class WebServer {
       }
     });
 
+    // لا نُلغي حوارات الموافقة عند انقطاع الاتصال فقط: قد تكون مجرد إعادة
+    // اتصال. تبقى معلّقة حتى تعود الواجهة (فتُعاد عرضها) أو تنتهي مهلة pi.
     ws.on("close", () => {
-      cancelPendingDialogs();
       const entry = this.clients.get(ws);
       clearWatchers(entry);
       entry?.unsubscribe?.();
       this.clients.delete(ws);
     });
     ws.on("error", () => {
-      cancelPendingDialogs();
       const entry = this.clients.get(ws);
       clearWatchers(entry);
       entry?.unsubscribe?.();

@@ -453,6 +453,7 @@ export class RpcConversation {
           .finally(resolve);
       };
       this.pendingUI.set(request.id, {
+        request,
         respond: (payload) => settle(payload, true),
         cancel: () => settle(null, false),
       });
@@ -460,6 +461,12 @@ export class RpcConversation {
   }
 
   /** إغلاق كل الحوارات المعلّقة دون إرسال (بعد خروج العملية أو إغلاق الجلسة). */
+  getPendingExtensionUI() {
+    return [...this.pendingUI.values()]
+      .map((entry) => entry.request)
+      .filter(Boolean);
+  }
+
   #cancelPendingUI() {
     if (!this.pendingUI.size) return;
     for (const entry of this.pendingUI.values()) {

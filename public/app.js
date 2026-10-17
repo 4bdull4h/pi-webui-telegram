@@ -156,6 +156,11 @@ const state = {
     keyFor: null,
     showAllProviders: false,
     refreshTimer: null,
+    // تبويب المهارات: بحث/مرشّح/عرض/طي التصنيفات (حالة عرض فقط).
+    skillQuery: "",
+    skillCat: "all",
+    skillView: "grid",
+    skillCollapsed: {},
   },
   // C1: حوارات الامتدادات وحالة المحرر التي ترسلها الإضافات.
   extUi: {
@@ -4478,42 +4483,250 @@ function renderOverviewTab(data) {
     </div>`;
 }
 
+/* =========================================================================
+ * المهارات: تصنيف تلقائي + شريط أدوات + بطاقات
+ * ======================================================================= */
+
+const SKILL_CATEGORIES = [
+  { key: "security", label: "أمن سيبراني", icon: "🛡️" },
+  { key: "design", label: "تصميم", icon: "🎨" },
+  { key: "engineering", label: "هندسة وتطوير", icon: "⚙️" },
+  { key: "web", label: "ويب ومتصفح", icon: "🌐" },
+  { key: "data", label: "بيانات وجودة", icon: "📊" },
+  { key: "planning", label: "خطط وبحث", icon: "🧭" },
+  { key: "other", label: "أخرى", icon: "🧩" },
+];
+
+const SKILL_CATEGORY_BY_KEY = new Map(SKILL_CATEGORIES.map((cat) => [cat.key, cat]));
+
+// ترتيب القواعد مهم: أول قاعدة تنطبق هي التي تحدد التصنيف.
+const SKILL_CATEGORY_RULES = [
+  ["security", /^offensive-/],
+  ["design", /^(design|frontend|visual|ux)/],
+  ["engineering", /^(git|refactor|remove|review|publish|pre-publish)/],
+  ["web", /^(browser|scraping|ultimate-browsing|web-)/],
+  ["data", /^(data-scientist|programming|debugging)/],
+  ["planning", /^(golden-rule|hyperplan|ulw|security-re|oss-security|software-security)/],
+];
+
+function skillCategoryOf(id) {
+  const value = String(id || "").toLowerCase();
+  for (const [key, rule] of SKILL_CATEGORY_RULES) {
+    if (rule.test(value)) return key;
+  }
+  if (/-qa$/.test(value)) return "data";
+  return "other";
+}
+
+function skillMatchesQuery(skill, query) {
+  if (!query) return true;
+  const haystack = `${skill.id || ""} ${skill.name || ""} ${skill.description || ""}`.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((part) => haystack.includes(part));
+}
+
+function highlightSkillText(text, query) {
+  const raw = String(text ?? "");
+  if (!query) return escapeHtml(raw);
+  const needle = escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!needle.trim()) return escapeHtml(raw);
+  try {
+    return escapeHtml(raw).replace(new RegExp(`(${needle})`, "gi"), `<mark class="skill-mark">$1</mark>`);
+  } catch {
+    return escapeHtml(raw);
+  }
+}
+
+function skillScopeShort(scope) {
+  return { user: "مستخدم", project: "مشروع", agents: ".agents" }[scope] || scope || "—";
+}
+
+function skillSizeLabel(size) {
+  const bytes = Number(size) || 0;
+  if (bytes >= 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  return `${Math.max(0, bytes)}B`;
+}
+
+function currentSkills() {
+  return controlOverview()?.skills || state.skills || [];
+}
+
+function renderSkillsToolbar(skills) {
+  const query = state.control.skillQuery || "";
+  const activeCat = state.control.skillCat || "all";
+  const view = state.control.skillView === "list" ? "list" : "grid";
+  const editableCount = skills.filter((skill) => skill.editable).length;
+  const counts = new Map(SKILL_CATEGORIES.map((cat) => [cat.key, 0]));
+  for (const skill of skills) {
+    const key = skillCategoryOf(skill.id);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  const catChips = SKILL_CATEGORIES.filter((cat) => counts.get(cat.key))
+    .map((cat) => {
+      const on = activeCat === cat.key;
+      return `<button class="skill-cat-chip${on ? " active" : ""}" data-action="skill-cat" data-cat="${cat.key}" aria-pressed="${on}"><span class="scc-icon">${cat.icon}</span>${escapeHtml(cat.label)}<b>${counts.get(cat.key)}</b></button>`;
+    })
+    .join("");
+  const allOn = activeCat === "all";
+  return `<div class="skill-toolbar">
+    <div class="skill-tb-main">
+      <div class="skill-tb-stat"><b>${skills.length}</b><span>مهارة</span><i>${editableCount} قابلة للتعديل</i></div>
+      <div class="skill-search${query ? " has-query" : ""}">
+        <svg class="skill-search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="skillSearch" type="search" autocomplete="off" spellcheck="false" placeholder="ابحث بالاسم أو الوصف…" aria-label="بحث في المهارات" value="${escapeHtml(query)}">
+        <kbd class="skill-kbd" aria-hidden="true">/</kbd>
+        <button type="button" class="skill-search-clear" data-action="skill-clear" aria-label="مسح البحث" title="مسح البحث">✕</button>
+      </div>
+      <div class="skill-tb-actions">
+        <div class="skill-view" role="group" aria-label="طريقة العرض">
+          <button class="${view === "grid" ? "active" : ""}" data-action="skill-view" data-view="grid" title="عرض شبكة" aria-label="عرض شبكة" aria-pressed="${view === "grid"}">▦</button>
+          <button class="${view === "list" ? "active" : ""}" data-action="skill-view" data-view="list" title="عرض قائمة" aria-label="عرض قائمة" aria-pressed="${view === "list"}">☰</button>
+        </div>
+        <button class="btn primary" data-action="new-skill">＋ مهارة جديدة</button>
+      </div>
+    </div>
+    <div class="skill-cat-bar">
+      <button class="skill-cat-chip${allOn ? " active" : ""}" data-action="skill-cat" data-cat="all" aria-pressed="${allOn}"><span class="scc-icon">✨</span>الكل<b>${skills.length}</b></button>
+      ${catChips}
+    </div>
+  </div>`;
+}
+
+function renderSkillCard(skill, query) {
+  const key = skillCategoryOf(skill.id);
+  const cat = SKILL_CATEGORY_BY_KEY.get(key) || SKILL_CATEGORY_BY_KEY.get("other");
+  const id = escapeHtml(skill.id);
+  const description = skill.description || "بلا وصف";
+  const nested = skill.relativePath && skill.relativePath.includes("/");
+  return `<article class="skill-card" data-id="${id}">
+    <div class="skill-card-top">
+      <span class="skill-card-icon" aria-hidden="true">${cat.icon}</span>
+      <span class="skill-card-name" title="${id}">${highlightSkillText(skill.id, query)}</span>
+      <span class="skill-badge ${skill.modelInvocation ? "auto" : "manual"}" title="${skill.modelInvocation ? "يستدعيها النموذج تلقائياً" : "تُستدعى يدوياً"}">${skill.modelInvocation ? "تلقائي" : "يدوي"}</span>
+      <div class="skill-menu">
+        <button class="skill-menu-btn" data-action="skill-menu" aria-label="إجراءات ${id}" aria-haspopup="menu" aria-expanded="false">⋯</button>
+        <div class="skill-menu-pop" role="menu">
+          <button role="menuitem" data-action="edit-skill" data-id="${id}"${skill.editable ? "" : " disabled"}>✏️ تحرير</button>
+          <button role="menuitem" data-action="copy-skill-id" data-id="${id}">⧉ نسخ المعرّف</button>
+          <button role="menuitem" class="skill-danger" data-action="delete-skill" data-id="${id}"${skill.editable ? "" : " disabled"}>🗑 حذف</button>
+        </div>
+      </div>
+    </div>
+    <p class="skill-card-desc" data-action="skill-expand" data-id="${id}" title="انقر للتوسيع/الطي">${highlightSkillText(description, query)}</p>
+    <div class="skill-card-chips">
+      <span class="chip">${skillSizeLabel(skill.size)}</span>
+      <span class="chip">${escapeHtml(skillScopeShort(skill.scope))}</span>
+      ${nested ? `<span class="chip">${escapeHtml(skill.relativePath)}</span>` : ""}
+      ${skill.editable ? "" : `<span class="chip warn">قراءة فقط</span>`}
+    </div>
+  </article>`;
+}
+
+function renderSkillResults(skills) {
+  const query = (state.control.skillQuery || "").trim();
+  const activeCat = state.control.skillCat || "all";
+  const collapsed = state.control.skillCollapsed || {};
+  if (!skills.length) {
+    return `<div class="skill-empty">
+      <div class="se-icon" aria-hidden="true">🧠</div>
+      <h4>لا توجد مهارات بعد</h4>
+      <p>أضف أول مهارة لتعليم النموذج متى يستخدم تعليمات متخصصة. تُحفظ في <code>~/.pi/agent/skills</code>.</p>
+      <button class="btn primary" data-action="new-skill">＋ مهارة جديدة</button>
+    </div>`;
+  }
+  const buckets = new Map(SKILL_CATEGORIES.map((cat) => [cat.key, []]));
+  for (const skill of skills) buckets.get(skillCategoryOf(skill.id)).push(skill);
+  for (const list of buckets.values()) {
+    list.sort((a, b) => String(a.id || "").localeCompare(String(b.id || ""), "en"));
+  }
+  const groups = [];
+  for (const cat of SKILL_CATEGORIES) {
+    if (activeCat !== "all" && activeCat !== cat.key) continue;
+    const items = buckets.get(cat.key).filter((skill) => skillMatchesQuery(skill, query));
+    if (!items.length) continue;
+    groups.push({ cat, items });
+  }
+  if (!groups.length) {
+    return `<div class="skill-empty">
+      <div class="se-icon" aria-hidden="true">🔍</div>
+      <h4>لا نتائج مطابقة</h4>
+      <p>لم نجد مهارة تطابق «${escapeHtml(query || "—")}». جرّب كلمة أقصر أو أزل المرشّحات.</p>
+      <button class="btn" data-action="skill-reset">إعادة ضبط البحث والمرشّحات</button>
+    </div>`;
+  }
+  const total = groups.reduce((sum, group) => sum + group.items.length, 0);
+  const note = query || activeCat !== "all"
+    ? `<div class="skill-results-note">${total} من ${skills.length} مهارة${activeCat !== "all" ? ` · ${escapeHtml(SKILL_CATEGORY_BY_KEY.get(activeCat)?.label || "")}` : ""}</div>`
+    : "";
+  const body = groups
+    .map(({ cat, items }) => {
+      const isCollapsed = Boolean(collapsed[cat.key]);
+      return `<section class="skill-group${isCollapsed ? " collapsed" : ""}" data-cat="${cat.key}">
+        <button class="skill-group-head" data-action="skill-collapse" data-cat="${cat.key}" aria-expanded="${!isCollapsed}">
+          <span class="skill-group-icon" aria-hidden="true">${cat.icon}</span>
+          <span class="skill-group-name">${escapeHtml(cat.label)}</span>
+          <span class="skill-group-count">${items.length}</span>
+          <span class="skill-group-line"></span>
+          <span class="skill-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="skill-grid">${items.map((skill) => renderSkillCard(skill, query)).join("")}</div>
+      </section>`;
+    })
+    .join("");
+  return note + body;
+}
+
 function renderSkillsTab(data) {
   const skills = data.skills || [];
   const draft = state.control.skillDraft;
-  const list = skills.length
-    ? skills
-        .map((skill) => {
-          const editable = skill.editable;
-          return `<div class="cc-item">
-            <div class="cc-item-icon">🧠</div>
-            <div class="cc-item-main">
-              <div class="cc-item-title">${escapeHtml(skill.id)}
-                ${editable ? `<span class="chip accent">قابلة للتعديل</span>` : `<span class="chip">${escapeHtml(skill.scopeLabel || skill.scope)}</span>`}
-              </div>
-              <div class="cc-item-desc">${escapeHtml(skill.description || "بلا وصف")}</div>
-              <div class="cc-chips">
-                <span class="chip ${skill.modelInvocation ? "good" : "warn"}">${skill.modelInvocation ? "استدعاء تلقائي" : "استدعاء يدوي"}</span>
-                <span class="chip">${escapeHtml(skill.relativePath || skill.id)}</span>
-                <span class="chip">${Math.max(1, Math.round((skill.size || 0) / 1024))}KB</span>
-              </div>
-            </div>
-            <div class="cc-item-actions">
-              ${editable ? `<button class="btn" data-action="edit-skill" data-id="${escapeHtml(skill.id)}">تعديل</button><button class="btn" data-action="delete-skill" data-id="${escapeHtml(skill.id)}">حذف</button>` : ""}
-            </div>
-          </div>`;
-        })
-        .join("")
-    : `<div class="cc-empty">لا توجد مهارات بعد. ابدأ بإضافة مهارة جديدة من الزر أعلاه.</div>`;
+  const view = state.control.skillView === "list" ? "list" : "grid";
   return `
-    <div class="cc-section">
-      <div class="cc-section-head">
-        <div><h3 class="cc-section-title">🧠 المهارات (${skills.length})</h3><p class="cc-section-desc">المهارة = تعليمات متخصصة تُحمّل عند الحاجة. الوصف الجيد يحدد متى يستخدمها النموذج.</p></div>
-        <div class="cc-section-actions"><button class="btn primary" data-action="new-skill">＋ مهارة جديدة</button></div>
-      </div>
-      ${draft ? skillForm(draft) : ""}
-      <div class="cc-list two">${list}</div>
-    </div>`;
+    ${renderSkillsToolbar(skills)}
+    ${draft ? skillForm(draft) : ""}
+    <div class="skill-results ${view}" id="skillResults">${renderSkillResults(skills)}</div>`;
+}
+
+/* إعادة رسم النتائج فقط (من دون لمس حقل البحث حتى لا يفقد التركيز) */
+function mountSkillResults() {
+  const host = document.querySelector("#skillResults");
+  if (!host) return;
+  const skills = currentSkills();
+  host.className = `skill-results ${state.control.skillView === "list" ? "list" : "grid"}`;
+  host.innerHTML = renderSkillResults(skills);
+}
+
+function syncSkillSearchState() {
+  const wrap = document.querySelector(".skill-search");
+  const input = document.querySelector("#skillSearch");
+  const query = state.control.skillQuery || "";
+  if (wrap) wrap.classList.toggle("has-query", Boolean(query));
+  if (input && input.value !== query) input.value = query;
+}
+
+function syncSkillToolbar() {
+  const activeCat = state.control.skillCat || "all";
+  document.querySelectorAll(".skill-cat-chip[data-cat]").forEach((button) => {
+    const on = button.dataset.cat === activeCat;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", String(on));
+  });
+  const view = state.control.skillView === "list" ? "list" : "grid";
+  document.querySelectorAll(".skill-view [data-view]").forEach((button) => {
+    const on = button.dataset.view === view;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", String(on));
+  });
+  syncSkillSearchState();
+}
+
+function resetSkillFilters() {
+  state.control.skillQuery = "";
+  state.control.skillCat = "all";
+  syncSkillToolbar();
+  mountSkillResults();
 }
 
 function skillForm(draft) {
@@ -4974,6 +5187,39 @@ function renderPermissionsTab(data) {
 function bindControlCenter() {
   els.controlBody.addEventListener("click", onControlClick);
   els.controlBody.addEventListener("submit", onControlSubmit);
+  els.controlBody.addEventListener("input", (event) => {
+    if (event.target?.id !== "skillSearch") return;
+    state.control.skillQuery = event.target.value;
+    syncSkillSearchState();
+    mountSkillResults();
+  });
+  els.controlBody.addEventListener("keydown", (event) => {
+    if (event.target?.id !== "skillSearch" || event.key !== "Escape") return;
+    if (state.control.skillQuery) {
+      event.preventDefault();
+      event.stopPropagation();
+      resetSkillFilters();
+    } else {
+      event.target.blur();
+    }
+  });
+  // إغلاق قوائم «⋯» عند النقر خارجها.
+  document.addEventListener("click", (event) => {
+    if (event.target?.closest?.(".skill-menu")) return;
+    document.querySelectorAll(".skill-menu.open").forEach((menu) => menu.classList.remove("open"));
+  });
+  // اختصار «/» لتركيز البحث داخل تبويب المهارات.
+  document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key !== "/" || !state.control.open || state.control.tab !== "skills") return;
+    const target = event.target;
+    if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+    const input = document.querySelector("#skillSearch");
+    if (!input) return;
+    event.preventDefault();
+    input.focus();
+    input.select();
+  });
 }
 
 async function afterMutation(message) {
@@ -4995,6 +5241,60 @@ async function onControlClick(event) {
       case "new-skill":
         state.control.skillDraft = { isNew: true, id: "", description: "", instructions: "" };
         renderControl();
+        break;
+      case "skill-cat":
+        state.control.skillCat = button.dataset.cat || "all";
+        syncSkillToolbar();
+        mountSkillResults();
+        break;
+      case "skill-view":
+        state.control.skillView = button.dataset.view === "list" ? "list" : "grid";
+        syncSkillToolbar();
+        mountSkillResults();
+        break;
+      case "skill-clear":
+        resetSkillFilters();
+        document.querySelector("#skillSearch")?.focus();
+        break;
+      case "skill-reset":
+        resetSkillFilters();
+        break;
+      case "skill-expand": {
+        const desc = button.closest(".skill-card")?.querySelector(".skill-card-desc");
+        if (desc) desc.classList.toggle("expanded");
+        break;
+      }
+      case "skill-collapse": {
+        const cat = button.dataset.cat;
+        state.control.skillCollapsed = state.control.skillCollapsed || {};
+        state.control.skillCollapsed[cat] = !state.control.skillCollapsed[cat];
+        const group = button.closest(".skill-group");
+        const isCollapsed = Boolean(state.control.skillCollapsed[cat]);
+        group?.classList.toggle("collapsed", isCollapsed);
+        button.setAttribute("aria-expanded", String(!isCollapsed));
+        break;
+      }
+      case "skill-menu": {
+        const menu = button.closest(".skill-menu");
+        const wasOpen = menu?.classList.contains("open");
+        document.querySelectorAll(".skill-menu.open").forEach((node) => {
+          node.classList.remove("open");
+          node.querySelector(".skill-menu-btn")?.setAttribute("aria-expanded", "false");
+        });
+        if (menu && !wasOpen) {
+          menu.classList.add("open");
+          button.setAttribute("aria-expanded", "true");
+        }
+        break;
+      }
+      case "copy-skill-id":
+        try {
+          await navigator.clipboard?.writeText(id);
+          toast(`تم نسخ المعرّف: ${id}`, "success");
+        } catch {
+          toast("تعذّر النسخ", "error");
+        }
+        document.querySelectorAll(".skill-menu.open").forEach((menu) => menu.classList.remove("open"));
         break;
       case "edit-skill": {
         const result = await apiFetch(`/api/skills/${encodeURIComponent(id)}`);
