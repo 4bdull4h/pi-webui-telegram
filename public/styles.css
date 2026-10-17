@@ -2626,3 +2626,1121 @@ html[data-theme="dark"] .ui-option.active {
     max-width: 120px;
   }
 }
+
+/* ==========================================================================
+   B1 — تبويبات جلسات متوازية (RTL + الثيمين)
+   ========================================================================== */
+
+.tabs-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px clamp(10px, 3vw, 40px) 0;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  flex-shrink: 0;
+}
+.tabs-scroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px 6px;
+  scrollbar-width: thin;
+  scroll-behavior: smooth;
+}
+.tabs-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+.tabs-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+  border-radius: 4px;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel);
+  color: var(--text);
+  transition: var(--trans);
+}
+.tab:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.tab.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.tab-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 6px 9px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+.tab-icon {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+}
+.tab-label {
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-inline-end: 3px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 0.9rem;
+  line-height: 1;
+  transition: var(--trans);
+}
+.tab-close:hover {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+  color: var(--danger);
+}
+.tab-unread {
+  flex-shrink: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  font-variant-numeric: tabular-nums;
+}
+.tab-busy-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  animation: tab-pulse 1.1s ease-in-out infinite;
+}
+@keyframes tab-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+.tab-add {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+}
+.tab-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ==========================================================================
+   B3 — لوحة أوامر / + زر الاختصار
+   ========================================================================== */
+
+.slash-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+}
+.slash-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cmd-panel {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% + 8px);
+  max-height: min(54vh, 430px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overscroll-behavior: contain;
+}
+.cmd-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 9px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.cmd-keys {
+  font-size: 0.64rem;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+.cmd-group {
+  padding: 8px 9px 3px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+.cmd-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.cmd-item:hover,
+.cmd-item.active {
+  background: var(--accent-soft);
+}
+.cmd-item.active {
+  outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.cmd-icon {
+  flex-shrink: 0;
+  width: 22px;
+  text-align: center;
+}
+.cmd-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.cmd-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  unicode-bidi: plaintext;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-desc {
+  font-size: 0.69rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-hint {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.cmd-empty {
+  padding: 12px 10px;
+  font-size: 0.74rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ==========================================================================
+   C2 — قواعد الموافقة (نافذة العرض/الحذف)
+   ========================================================================== */
+
+.approvals-note {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.approvals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.approvals-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.approvals-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.approvals-info b {
+  font-size: 0.82rem;
+  direction: ltr;
+  text-align: start;
+}
+.approvals-info code {
+  font-size: 0.74rem;
+  color: var(--muted);
+  background: transparent;
+  padding: 0;
+  overflow-wrap: anywhere;
+  direction: ltr;
+  text-align: start;
+}
+.approvals-info small {
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+.approvals-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.approvals-path {
+  display: block;
+  margin-top: 12px;
+  font-size: 0.64rem;
+  color: var(--muted);
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+.btn.danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+@media (max-width: 560px) {
+  .tabs-bar {
+    padding-inline: 8px;
+  }
+  .tab-label {
+    max-width: 105px;
+  }
+  .cmd-panel {
+    max-height: 48vh;
+  }
+  .cmd-keys {
+    display: none;
+  }
+  .cmd-desc {
+    max-width: 190px;
+  }
+  .approvals-row {
+    flex-wrap: wrap;
+  }
+}
+
+/* تعزيز تمييز التبويب النشط (خصوصاً في الثيم الداكن) */
+.tab.active {
+  box-shadow:
+    inset 0 -2px 0 var(--accent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.tab.active .tab-label {
+  font-weight: 700;
+}
+
+/* ==========================================================================
+   C2 — حوار أصلي (dialog) + حيوية الواجهة
+   ========================================================================== */
+
+/* الحوار الأصلي: الطبقة العليا للمتصفح، لا يمكن دفنه تحت أي عنصر. */
+dialog.ext-ui-dialog {
+  border: 0;
+  padding: 0;
+  margin: auto;
+  background: transparent;
+  color: inherit;
+  max-width: min(560px, 94vw);
+  max-height: 88vh;
+  width: min(560px, 94vw);
+  overflow: visible;
+}
+dialog.ext-ui-dialog:not([open]) {
+  display: none !important;
+}
+dialog.ext-ui-dialog::backdrop {
+  background: rgba(4, 8, 20, 0.62);
+  backdrop-filter: blur(4px);
+}
+html[data-theme="dark"] dialog.ext-ui-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+dialog.ext-ui-dialog[open] .ext-ui-card {
+  animation: extDialogIn 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes extDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+}
+.ext-ui-card {
+  width: 100%;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+.ext-ui-head {
+  gap: 10px;
+  align-items: flex-start;
+}
+.ext-ui-head h3 {
+  flex: 1;
+  min-width: 0;
+}
+
+/* خاتم العدّاد التنازلي */
+.ext-ui-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+}
+.ext-ui-ring svg {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+.ext-ui-ring .ring-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--border) 90%, transparent);
+  stroke-width: 3;
+}
+.ext-ui-ring .ring-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 94.25;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 480ms linear, stroke 200ms linear;
+}
+.ext-ui-ring.is-urgent .ring-value {
+  stroke: var(--danger);
+}
+.ext-ui-ring .ext-ui-timer {
+  position: relative;
+  font-size: 0.62rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ext-ui-later {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.68rem;
+  border-radius: 8px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ext-ui-later:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* شريحة «بانتظار الموافقة» فوق المحرر */
+.approval-queue {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  border-radius: 12px;
+  padding: 8px 12px;
+  margin-block-end: 8px;
+  font-size: 0.78rem;
+  animation: cardIn 160ms ease both;
+}
+.approval-queue .aq-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.approval-queue .aq-count {
+  font-size: 0.68rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.approval-queue .aq-btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.74rem;
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: var(--trans);
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.approval-queue .aq-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.approval-queue .aq-btn.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #08122b;
+  font-weight: 600;
+}
+
+/* شريط التقدّم الرقيق أعلى المحادثة */
+.turn-progress {
+  height: 2px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: transparent;
+  opacity: 0;
+  transition: opacity 160ms linear;
+}
+.turn-progress span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+html[dir="rtl"] .turn-progress span {
+  transform-origin: 100% 50%;
+}
+.turn-progress[data-state="thinking"],
+.turn-progress[data-state="streaming"],
+.turn-progress[data-state="tool"] {
+  opacity: 1;
+}
+.turn-progress[data-state="thinking"] span {
+  animation: progressSweep 1.5s ease-in-out infinite;
+}
+.turn-progress[data-state="streaming"] span {
+  transform: scaleX(0.78);
+  transition: transform 400ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: progressPulse 1.8s ease-in-out infinite;
+}
+.turn-progress[data-state="tool"] span {
+  transform: scaleX(1);
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  animation: progressPulse 1.1s ease-in-out infinite;
+}
+@keyframes progressSweep {
+  0% { transform: scaleX(0.05) translateX(0); }
+  60% { transform: scaleX(0.45) translateX(0); }
+  100% { transform: scaleX(0.05) translateX(0); }
+}
+@keyframes progressPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* عدّاد مدة المهمة بجانب زر الإيقاف */
+.turn-timer {
+  align-self: center;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+/* مؤشر الكتابة/التدفق */
+.msg.assistant.generating .avatar {
+  position: relative;
+}
+.msg.assistant.generating .avatar::after {
+  content: "";
+  position: absolute;
+  inset-block-end: -9px;
+  inset-inline-start: 50%;
+  translate: -50% 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: -7px 0 0 color-mix(in srgb, var(--accent) 55%, transparent),
+    7px 0 0 color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: typingDots 1.05s ease-in-out infinite;
+}
+@keyframes typingDots {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+.md.streaming::after {
+  content: "▍";
+  display: inline-block;
+  margin-inline-start: 2px;
+  color: var(--accent);
+  animation: caretBlink 1s steps(1, end) infinite;
+}
+@keyframes caretBlink {
+  0%, 45% { opacity: 1; }
+  46%, 100% { opacity: 0; }
+}
+
+/* حركة دخول البطاقات والرسائل + انتقال حالة الأداة */
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.msg,
+.tool,
+.approval-queue {
+  animation: cardIn 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.tool-head .t-status {
+  transition: color 160ms linear;
+}
+.tool.running .t-status {
+  color: var(--accent);
+}
+.tool:not(.running):not(.error) .t-status {
+  color: var(--success);
+}
+.tool.error .t-status {
+  color: var(--danger);
+}
+.tool {
+  transition: border-color 160ms linear, background 160ms linear;
+}
+
+/* مفتاح نغمة التنبيه */
+.sound-btn .bell-slash {
+  opacity: 0;
+  transition: opacity 160ms linear;
+}
+.sound-btn[aria-pressed="false"] .bell-slash {
+  opacity: 1;
+}
+.sound-btn[aria-pressed="false"] {
+  color: var(--muted);
+}
+
+/* احترام تقليل الحركة */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .md.streaming::after,
+  .msg.assistant.generating .avatar::after {
+    animation: none !important;
+  }
+  .turn-progress span {
+    animation: none !important;
+  }
+}
+
+/* =====================================================================
+ * C3 — تنبيهات: شريط الانقطاع + لوحة الإشعارات والأصوات + التشخيص
+ * كل القواعد هنا مضافة في نهاية الملف ولا تعدّل قواعد قائمة.
+ * ===================================================================== */
+
+/* --- شريط انقطاع الاتصال (أعلى الواجهة) --- */
+.conn-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 16px;
+  font-size: 0.84rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 16%, var(--panel));
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  animation: cardIn 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.conn-banner .cb-icon {
+  font-size: 1rem;
+  animation: connPulse 1.6s ease-in-out infinite;
+}
+@keyframes connPulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.96); }
+  50% { opacity: 1; transform: scale(1.06); }
+}
+.conn-banner .cb-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.conn-banner .cb-text strong {
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+.conn-banner .cb-text span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.conn-banner .cb-count {
+  font-family: ui-monospace, monospace;
+  font-size: 0.76rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.conn-banner .cb-btn {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #08122b;
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--trans);
+}
+.conn-banner .cb-btn:hover {
+  filter: brightness(1.06);
+}
+.conn-banner .cb-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 2px 4px;
+}
+.conn-banner[data-reason="server-restart"] {
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  border-bottom-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.conn-banner[data-reason="auth"] {
+  background: color-mix(in srgb, #f59e0b 16%, var(--panel));
+  border-bottom-color: color-mix(in srgb, #f59e0b 45%, var(--border));
+}
+.conn-banner[data-reason="timeout"] .cb-icon,
+.conn-banner[data-reason="network"] .cb-icon {
+  animation-duration: 1.1s;
+}
+body.conn-down .conn {
+  color: var(--danger);
+}
+
+/* --- شريط «الإشعارات معطّلة» --- */
+.notify-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 16px;
+  font-size: 0.8rem;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-2));
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.notify-bar > span {
+  flex: 1 1 220px;
+}
+.notify-bar .nb-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.76rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.notify-bar .nb-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.notify-bar .nb-x {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+}
+.notify-bar .nb-x:hover {
+  color: var(--text);
+}
+
+/* --- زر 🔔 ونقطة التنبيه --- */
+.notify-btn {
+  position: relative;
+}
+.notify-btn .nb-dot {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-end: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--panel-2);
+}
+
+/* --- حوارات C3 (لوحة الإشعارات + التشخيص + الشرح) --- */
+.c3-dialog {
+  border: 0;
+  padding: 0;
+  margin: auto;
+  background: transparent;
+  color: var(--text);
+  max-width: min(720px, 94vw);
+  max-height: 88vh;
+}
+.c3-dialog::backdrop {
+  background: rgba(4, 8, 20, 0.55);
+  backdrop-filter: blur(3px);
+}
+html[data-theme="light"] .c3-dialog::backdrop {
+  background: rgba(24, 32, 60, 0.28);
+}
+.c3-dialog .c3-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(720px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+html[data-theme="dark"] .c3-dialog .c3-card {
+  background: linear-gradient(160deg, #141414, #0d0d0d);
+  border-color: var(--qumra-line, var(--border));
+}
+.c3-dialog .c3-body {
+  padding: 14px 18px 18px;
+  display: grid;
+  gap: 14px;
+  overflow: auto;
+  font-size: 0.86rem;
+}
+.c3-sec {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+}
+.c3-sec h4 {
+  margin: 0;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.c3-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.c3-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+.c3-switch input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.c3-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 400;
+}
+.c3-range {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.c3-sound-list {
+  display: grid;
+  gap: 6px;
+}
+.c3-sound {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: background 160ms linear, border-color 160ms linear;
+}
+.c3-sound:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: var(--border);
+}
+.c3-sound-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.c3-sound-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.c3-sound-text strong {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.c3-sound-text span {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.c3-mini-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.74rem;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--trans);
+}
+.c3-mini-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+.c3-mini-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.c3-perm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.c3-log {
+  overflow: auto;
+  max-height: 230px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.c3-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+}
+.c3-table th,
+.c3-table td {
+  text-align: start;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.c3-table th {
+  position: sticky;
+  inset-block-start: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+}
+.c3-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.c3-table td:last-child {
+  white-space: normal;
+  color: var(--muted);
+}
+.c3-empty {
+  text-align: center !important;
+  color: var(--muted);
+  padding: 14px !important;
+}
+.c3-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 0 18px 18px;
+  flex-wrap: wrap;
+}
+.c3-explain .c3-card {
+  width: min(440px, 92vw);
+}
+.c3-explain-body {
+  padding: 0 18px 12px;
+  font-size: 0.86rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.c3-explain-body p {
+  margin: 0 0 8px;
+}
+.c3-list {
+  margin: 0;
+  padding-inline-start: 18px;
+  display: grid;
+  gap: 4px;
+}
+.c3-dialog .modal-head {
+  flex-shrink: 0;
+}
+.c3-dialog .modal-head h3 {
+  font-size: 0.95rem;
+}
+
+/* استجابة الشاشات الصغيرة */
+@media (max-width: 720px) {
+  .conn-banner {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .conn-banner .cb-text {
+    flex: 1 1 100%;
+  }
+  .conn-banner .cb-count {
+    order: 3;
+  }
+  .c3-dialog .c3-card {
+    width: 96vw;
+    max-height: 90vh;
+  }
+  .c3-dialog .c3-body {
+    padding: 12px 12px 16px;
+  }
+  .c3-sound {
+    grid-template-columns: auto 1fr;
+  }
+  .c3-sound .c3-mini-btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+/* احترام تقليل الحركة: نوقف الحركات لا الأصوات */
+@media (prefers-reduced-motion: reduce) {
+  .conn-banner .cb-icon {
+    animation: none !important;
+  }
+  .conn-banner,
+  .c3-dialog .c3-card {
+    animation: none !important;
+  }
+  .c3-mini-btn:hover:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* C3 — ترويسة سجل الاتصال + زر المسح (إضافة في نهاية الملف فقط) */
+.c3-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.c3-sec-head h4 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.c3-sec-head .c3-mini-btn {
+  flex: 0 0 auto;
+}
+@media (max-width: 520px) {
+  .c3-sec-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

@@ -11,13 +11,14 @@
  * - APPROVAL_MODE = off | dangerous | all (افتراضي dangerous).
  *   dangerous: bash, write, edit، وكل أداة تبدأ بـ mcp__.
  *   all: كل أداة.
- * - الخيارات: "✅ سماح" / "⛔️ رفض" / "♾️ سماح دائماً".
- * - «سماح دائماً» يحفظ قاعدة {tool, pattern} في data/approvals.json:
+ * - الخيارات: "✅ سماح" / "⛔️ رفض" / "🔁 سماح دائماً لهذا الأمر" / "♾️ سماح دائماً لهذه الأداة".
+ * - «سماح دائماً لهذا الأمر» يحفظ قاعدة {tool, pattern} في data/approvals.json:
  *     bash      → أول كلمة من الأمر (مثال: git)
  *     write/edit → مجلد الملف
  *     غيرها     → اسم الأداة
- *   وتُطبَّق القاعدة في الجلسات التالية أيضاً.
- * - APPROVAL_TIMEOUT_MS (افتراضي 120000) ثم رفض آمن.
+ *   و«سماح دائماً لهذه الأداة» يحفظ {tool, pattern:"*"} فيمنع السؤال عنها نهائياً.
+ *   تُطبَّق القاعدة في الجلسات التالية أيضاً.
+ * - APPROVAL_TIMEOUT_MS (افتراضي 90000) ثم رفض آمن مع تلميح تحديث الصفحة/‏-stop.
  * - عند غياب واجهة المستخدم (print/json) أو فشل الحوار:
  *     APPROVAL_FAIL_OPEN=1 → يُسمح، وإلا يُرفض (الافتراضي الآمن).
  * - لا يستخدم ctx.ui.custom إطلاقاً (غير مدعوم في RPC).
@@ -35,10 +36,16 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-wo
 
 const OPTION_ALLOW = "✅ سماح";
 const OPTION_DENY = "⛔️ رفض";
-const OPTION_ALWAYS = "♾️ سماح دائماً";
-const OPTIONS = [OPTION_ALLOW, OPTION_DENY, OPTION_ALWAYS];
+const OPTION_ALWAYS_COMMAND = "🔁 سماح دائماً لهذا الأمر";
+const OPTION_ALWAYS_TOOL = "♾️ سماح دائماً لهذه الأداة";
+const OPTIONS = [OPTION_ALLOW, OPTION_DENY, OPTION_ALWAYS_COMMAND, OPTION_ALWAYS_TOOL];
+/** نمط «كل الحالات» لقاعدة على مستوى الأداة. */
+export const WILDCARD_PATTERN = "*";
 
 const REJECT_REASON = "رفض المستخدم تنفيذ الأداة";
+/** تلميح عند انتهاء المهلة بلا وصول الحوار لأي واجهة (كاش متصفح قديم). */
+export const TIMEOUT_HINT =
+  "لم تصل الموافقة إلى أي واجهة. حدّث الصفحة (Ctrl+Shift+R) أو أرسل /stop";
 const BLOCKED_NO_UI = "موافقة الأداة مطلوبة ولا توجد واجهة مستخدم متاحة";
 
 /** الأدوات الخطرة التي تُطلب الموافقة عليها في الوضع الافتراضي. */
@@ -46,7 +53,7 @@ const DANGEROUS_TOOLS = new Set(["bash", "write", "edit"]);
 /** بادئة أدوات خوادم MCP. */
 const MCP_PREFIX = "mcp__";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const FILE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RULES_FILE = resolve(FILE_DIR, "..", "data", "approvals.json");
@@ -93,6 +100,9 @@ function failOpen(): boolean {
 function rulesFile(): string {
   const explicit = process.env.PI_APPROVALS_FILE || process.env.APPROVALS_FILE;
   if (explicit && explicit.trim()) return resolve(explicit.trim());
+  // نفس منطق الخادم: DATA_DIR/approvals.json إن ضُبط، وإلا data المشروع.
+  const dataDir = process.env.DATA_DIR?.trim();
+  if (dataDir) return resolve(dataDir, "approvals.json");
   return DEFAULT_RULES_FILE;
 }
 
@@ -169,8 +179,11 @@ function persistRule(rule: ApprovalRule): Promise<boolean> {
 }
 
 function matchesRule(rules: ApprovalRule[], tool: string, pattern: string | null): boolean {
-  if (!pattern) return false;
-  return rules.some((rule) => rule.tool === tool && rule.pattern === pattern);
+  return rules.some(
+    (rule) =>
+      rule.tool === tool &&
+      (rule.pattern === WILDCARD_PATTERN || (!!pattern && rule.pattern === pattern)),
+  );
 }
 
 /* =========================================================================
@@ -282,6 +295,8 @@ export interface ApprovalDecision {
   reason?: string;
   remember: boolean;
   pattern: string | null;
+  /** level = قاعدة على مستوى الأداة كلها (pattern "*"). */
+  level: "none" | "command" | "tool";
 }
 
 /**
@@ -290,9 +305,14 @@ export interface ApprovalDecision {
  * FAIL_OPEN مخصّص لغياب الواجهة لا لرفض المستخدم).
  */
 export function decide(choice: string | undefined, pattern: string | null): ApprovalDecision {
-  if (choice === OPTION_ALLOW) return { allow: true, remember: false, pattern };
-  if (choice === OPTION_ALWAYS) return { allow: true, remember: !!pattern, pattern };
-  return { allow: false, reason: REJECT_REASON, remember: false, pattern };
+  if (choice === OPTION_ALLOW) return { allow: true, remember: false, pattern, level: "none" };
+  if (choice === OPTION_ALWAYS_COMMAND) {
+    return { allow: true, remember: !!pattern, pattern, level: "command" };
+  }
+  if (choice === OPTION_ALWAYS_TOOL) {
+    return { allow: true, remember: true, pattern: WILDCARD_PATTERN, level: "tool" };
+  }
+  return { allow: false, reason: REJECT_REASON, remember: false, pattern, level: "none" };
 }
 
 function safeNotify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error"): void {
@@ -327,8 +347,10 @@ export default function approvals(pi: ExtensionAPI): void {
 
       const title = buildTitle(event, pattern, cwd);
       let choice: string | undefined;
+      const timeoutMs = approvalTimeoutMs();
+      const startedAt = Date.now();
       try {
-        choice = await ctx.ui.select(title, OPTIONS, { timeout: approvalTimeoutMs() });
+        choice = await ctx.ui.select(title, OPTIONS, { timeout: timeoutMs });
       } catch (err) {
         const detail = (err as Error)?.message || String(err);
         safeNotify(ctx, `تعذّر عرض حوار الموافقة: ${detail}`, "error");
@@ -338,23 +360,27 @@ export default function approvals(pi: ExtensionAPI): void {
 
       const decision = decide(choice, pattern);
 
-      if (decision.allow && decision.remember && pattern) {
-        try {
-          const saved = await persistRule({
-            tool: event.toolName,
-            pattern,
-            createdAt: Date.now(),
-          });
-          safeNotify(
-            ctx,
-            saved
-              ? `♾️ حُفظت قاعدة السماح: ${event.toolName} → ${pattern}`
-              : `♾️ القاعدة موجودة مسبقاً: ${event.toolName} → ${pattern}`,
-            "info",
-          );
-        } catch (err) {
-          // فشل الحفظ لا يمنع هذه المرة، لكنه يُبلَّغ للمستخدم.
-          safeNotify(ctx, `تعذّر حفظ قاعدة السماح: ${(err as Error)?.message || err}`, "error");
+      if (decision.allow && decision.remember) {
+        const rulePattern = decision.pattern;
+        if (rulePattern) {
+          try {
+            const saved = await persistRule({
+              tool: event.toolName,
+              pattern: rulePattern,
+              createdAt: Date.now(),
+            });
+            const label = decision.level === "tool" ? "لهذه الأداة (كل الحالات)" : `→ ${rulePattern}`;
+            safeNotify(
+              ctx,
+              saved
+                ? `♾️ حُفظت قاعدة السماح: ${event.toolName} ${label}`
+                : `♾️ القاعدة موجودة مسبقاً: ${event.toolName} ${label}`,
+              "info",
+            );
+          } catch (err) {
+            // فشل الحفظ لا يمنع هذه المرة، لكنه يُبلَّغ للمستخدم.
+            safeNotify(ctx, `تعذّر حفظ قاعدة السماح: ${(err as Error)?.message || err}`, "error");
+          }
         }
       }
 
@@ -366,7 +392,9 @@ export default function approvals(pi: ExtensionAPI): void {
       const reason =
         choice === OPTION_DENY
           ? REJECT_REASON
-          : `${REJECT_REASON} (أُلغي الحوار أو انتهت المهلة)`;
+          : choice === undefined && Date.now() - startedAt >= timeoutMs - 500
+            ? `${REJECT_REASON} (انتهت المهلة) — ${TIMEOUT_HINT}`
+            : `${REJECT_REASON} (أُلغي الحوار)`;
       safeNotify(ctx, `⛔️ ${reason} — ${event.toolName}`, "warning");
       return { block: true, reason };
     } catch (err) {
@@ -384,7 +412,11 @@ export default function approvals(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       const rules = loadRules();
       const lines = rules.length
-        ? rules.map((rule) => `${rule.tool} → ${rule.pattern}`)
+        ? rules.map((rule) =>
+            rule.pattern === WILDCARD_PATTERN
+              ? `${rule.tool} → كل الأوامر (سماح دائم للأداة)`
+              : `${rule.tool} → ${rule.pattern}`,
+          )
         : ["لا توجد قواعد محفوظة."];
       ctx.ui.notify(`قواعد الموافقة (${rulesFile()}):\n${lines.join("\n")}`, "info");
     },
@@ -400,4 +432,11 @@ function loggerlessWarn(message: string): void {
   }
 }
 
-export { OPTIONS, OPTION_ALLOW, OPTION_DENY, OPTION_ALWAYS, REJECT_REASON };
+export {
+  OPTIONS,
+  OPTION_ALLOW,
+  OPTION_DENY,
+  OPTION_ALWAYS_COMMAND,
+  OPTION_ALWAYS_TOOL,
+  REJECT_REASON,
+};

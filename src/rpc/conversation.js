@@ -10,7 +10,7 @@ import logger from "../logger.js";
 import { transcriptFromMessages } from "../events.js";
 import { RpcClient } from "./client.js";
 import { EventQueue, normalizeRpcEvent } from "./events.js";
-import { SYSTEM_APPEND, THINKING_LEVELS, normalizeThinking, safeId } from "./shared.js";
+import { SYSTEM_APPEND, THINKING_LEVELS, RPC_PASSTHROUGH_COMMANDS, RPC_PASSTHROUGH_TIMEOUTS, normalizeThinking, safeId } from "./shared.js";
 
 const SOURCES = ["web", "telegram", "api", "system"];
 
@@ -568,6 +568,39 @@ export class RpcConversation {
     return client.send({ type: "compact" }, { timeoutMs: 120_000 });
   }
 
+  /**
+   * يمرّر أمر RPC عاماً مسموحاً (B1) ويعيد بيانات الرد كما وصلت من pi.
+   * لا يغيّر أي مسار قائم: prompt/abort/compact… تبقى كما هي.
+   * @param {string} command اسم الأمر في بروتوكول RPC
+   * @param {object} [data] حقول الأمر (type/id يُضافان هنا ولا يُقبل تجاوزهما)
+   * @returns {Promise<any>} data من رد pi (قد تكون null)
+   */
+  async rpc(command, data = {}) {
+    const name = String(command || "").trim();
+    if (!RPC_PASSTHROUGH_COMMANDS.includes(name)) {
+      throw new Error(`أمر RPC غير مسموح: ${name || "(فارغ)"}`);
+    }
+    const client = await this.ensure();
+    const payload = data && typeof data === "object" ? { ...data } : {};
+    delete payload.id;
+    delete payload.type;
+    // توافق الواجهة: `sessionFile` في مساراتنا القديمة يقابله `sessionPath` في pi.
+    if (name === "switch_session" && payload.sessionPath == null && payload.sessionFile != null) {
+      payload.sessionPath = payload.sessionFile;
+      delete payload.sessionFile;
+    }
+    // /compact مع تعليمات (B3): نقبل instructions ونحوّلها إلى customInstructions.
+    if (name === "compact" && payload.customInstructions == null && payload.instructions != null) {
+      payload.customInstructions = payload.instructions;
+      delete payload.instructions;
+    }
+    const response = await client.send(
+      { ...payload, type: name },
+      { timeoutMs: RPC_PASSTHROUGH_TIMEOUTS[name] || 60_000 },
+    );
+    return response ?? null;
+  }
+
   async setTitle(title) {
     const client = await this.ensure();
     const name = String(title).slice(0, 120);
@@ -603,6 +636,16 @@ export class RpcConversation {
     return this.transcript;
   }
 
+  /**
+   * إعادة جلب السجل من العملية الفرعية. مفيدة عند اتصال الواجهة قبل
+   * اكتمال جاهزية جسر RPC (كان السجل يعود فارغاً في أول تحميل).
+   */
+  async refreshTranscript() {
+    const client = await this.ensure();
+    await this.#refreshTranscript(client, 60_000);
+    return this.transcript;
+  }
+
   async #disposeClient() {
     const client = this.client;
     this.client = null;
@@ -616,7 +659,6 @@ export class RpcConversation {
       logger.debug(`[${this.id}] إغلاق الجسر:`, err?.message || err);
     }
   }
-
   dispose() {
     const client = this.client;
     this.client = null;

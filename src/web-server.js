@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { WebSocketServer } from "ws";
 
 import config from "./config.js";
 import logger from "./logger.js";
+import { RPC_PASSTHROUGH_COMMANDS } from "./rpc/shared.js";
 import {
   KNOWN_APIS,
   PERMISSIONS,
@@ -50,6 +51,18 @@ const MIME = {
   ".map": "application/json; charset=utf-8",
 };
 
+/** وصف مختصر لقرار المستخدم في حوار الامتداد (للسجل فقط). */
+function describeUiResponse(payload) {
+  if (!payload || typeof payload !== "object") return "empty";
+  if (payload.cancelled) return "cancelled";
+  if (payload.confirmed !== undefined) return payload.confirmed ? "confirmed:true" : "confirmed:false";
+  if (payload.value !== undefined) {
+    const value = String(payload.value).replace(/\s+/g, " ").trim();
+    return `value:${value.slice(0, 60)}`;
+  }
+  return "empty";
+}
+
 /** يبني طلب حوار موحّداً للعميل من حدث extension_ui. */
 function extensionUiRequest(event) {
   return {
@@ -85,6 +98,81 @@ function safeJoin(root, target) {
   const resolved = resolve(root, `.${normalize(target)}`);
   if (resolved !== root && !resolved.startsWith(root + sep)) return null;
   return resolved;
+}
+
+/* ===== كسر كاش المتصفح للملفات الثابتة ===== */
+
+/** ذاكرة مؤقتة قصيرة لبصمة mtime: لا تتجاوز دقيقة واحدة. */
+const BUILD_STAMP_TTL_MS = 60_000;
+const buildStamps = new Map(); // path -> { at, token }
+
+/** بصمة إصدار من mtime، مخزّنة مؤقتاً لدقيقة كحد أقصى. */
+async function buildStamp(filePath) {
+  const now = Date.now();
+  const cached = buildStamps.get(filePath);
+  if (cached && now - cached.at < BUILD_STAMP_TTL_MS) return cached.token;
+  let token = "0";
+  try {
+    token = String(Math.floor((await stat(filePath)).mtimeMs));
+  } catch {
+    // ملف غير موجود: بصمة ثابتة (سيُعيد serveFile 404 على أي حال).
+  }
+  buildStamps.set(filePath, { at: now, token });
+  return token;
+}
+
+function isInsidePublic(filePath) {
+  return filePath === config.publicDir || filePath.startsWith(config.publicDir + sep);
+}
+
+/* ===== C2/B3: قواعد موافقة الأدوات (data/approvals.json) ===== */
+
+/**
+ * نفس الملف الذي تكتبه extensions/approvals.ts: متغيّر صريح، وإلا DATA_DIR،
+ * وإلا مجلد data في جذر المشروع. هذا يبقي الخادم والإضافة متطابقين.
+ */
+function approvalsFilePath() {
+  const explicit = process.env.PI_APPROVALS_FILE || process.env.APPROVALS_FILE;
+  if (explicit && explicit.trim()) return resolve(explicit.trim());
+  return join(config.dataDir, "approvals.json");
+}
+
+function normalizeApprovalRules(parsed) {
+  const raw = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.rules)
+      ? parsed.rules
+      : [];
+  const seen = new Set();
+  const rules = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const tool = typeof item.tool === "string" ? item.tool.trim() : "";
+    const pattern = typeof item.pattern === "string" ? item.pattern.trim() : "";
+    if (!tool || !pattern) continue;
+    const key = `${tool}\u0000${pattern}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const createdAt = Number(item.createdAt);
+    rules.push({ tool, pattern, ...(Number.isFinite(createdAt) ? { createdAt } : {}) });
+  }
+  return rules;
+}
+
+async function readApprovalRules(file = approvalsFilePath()) {
+  try {
+    return normalizeApprovalRules(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    // ملف غائب أو تالف: لا قواعد (السلوك الآمن = طلب موافقة جديد).
+    return [];
+  }
+}
+
+async function writeApprovalRules(rules, file = approvalsFilePath()) {
+  await mkdir(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify({ version: 1, rules }, null, 2)}\n`, "utf8");
+  await rename(tmp, file);
 }
 
 /** يقرأ الجسم الخام كـBuffer (للرفع الثنائي) بحد أقصى. */
@@ -303,6 +391,34 @@ export class WebServer {
 
       if (pathname === "/api/overview" && method === "GET") {
         return sendJson(res, 200, await this.overview());
+      }
+
+      // ===== C2: قواعد الموافقة المحفوظة (عرض/حذف) — محمية بـWEB_TOKEN =====
+      if (pathname === "/api/approvals") {
+        const file = approvalsFilePath();
+        if (method === "GET") {
+          return sendJson(res, 200, { ok: true, path: file, rules: await readApprovalRules(file) });
+        }
+        if (method === "DELETE") {
+          const body = await readBody(req).catch(() => ({}));
+          const filePath = approvalsFilePath();
+          const current = await readApprovalRules(filePath);
+          const tool = typeof body?.tool === "string" ? body.tool.trim() : "";
+          const pattern = typeof body?.pattern === "string" ? body.pattern.trim() : "";
+          // بلا tool = حذف كل القواعد؛ مع tool/pattern = حذف قاعدة محددة.
+          const next = tool
+            ? current.filter((rule) => !(rule.tool === tool && (!pattern || rule.pattern === pattern)))
+            : [];
+          await writeApprovalRules(next, filePath);
+          logger.info(`ويب: حُدّثت قواعد الموافقة (${current.length} → ${next.length}).`);
+          return sendJson(res, 200, {
+            ok: true,
+            path: filePath,
+            rules: next,
+            removed: current.length - next.length,
+          });
+        }
+        return sendJson(res, 405, { ok: false, error: "method not allowed" });
       }
 
       // ===== B2: رفع الملفات وإكمال المسارات والمعاينة =====
@@ -603,18 +719,55 @@ export class WebServer {
     try {
       const info = await stat(filePath);
       if (!info.isFile()) throw new Error("not a file");
-      const data = await readFile(filePath);
-      const type = overrideType || MIME[extname(filePath).toLowerCase()] || "application/octet-stream";
-      res.writeHead(200, {
+      const extension = extname(filePath).toLowerCase();
+      const type = overrideType || MIME[extension] || "application/octet-stream";
+      const inPublic = isInsidePublic(filePath);
+      let data = await readFile(filePath);
+
+      // نصوص الواجهة: بصمة إصدار داخل الملف + ربط الأصول ببصمة كل أصل (mtime)
+      // حتى لا يبقى المتصفح على نسخة قديمة من app.js.
+      if (
+        inPublic &&
+        (extension === ".html" || extension === ".js" || extension === ".mjs" || extension === ".css")
+      ) {
+        let text = data.toString("utf8");
+        if (extension === ".html") {
+          const appVersion = await buildStamp(join(config.publicDir, "app.js"));
+          const cssVersion = await buildStamp(join(config.publicDir, "styles.css"));
+          text = text
+            .replace(/src="\/app\.js"/g, `src="/app.js?v=${appVersion}"`)
+            .replace(/href="\/styles\.css"/g, `href="/styles.css?v=${cssVersion}"`);
+        }
+        text = text.replaceAll("__BUILD__", await buildStamp(filePath));
+        data = Buffer.from(text, "utf8");
+      }
+
+      const headers = {
         "content-type": type,
-        "cache-control": "no-cache",
         "content-length": data.length,
-      });
+      };
+      if (inPublic) {
+        // ملفات public/ متغيّرة أثناء التطوير: منع أي تخزين في المتصفح.
+        headers["cache-control"] = "no-store, must-revalidate";
+        headers["pragma"] = "no-cache";
+      } else {
+        headers["cache-control"] = "no-cache";
+      }
+      res.writeHead(200, headers);
       res.end(data);
     } catch {
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       res.end("404");
     }
+  }
+
+  /** عدد عملاء WS المرتبطين حالياً بمحادثة معيّنة. */
+  conversationClientCount(conversationId) {
+    let count = 0;
+    for (const entry of this.clients.values()) {
+      if (entry.conversationId === conversationId) count += 1;
+    }
+    return count;
   }
 
   clientConfig() {
@@ -651,7 +804,7 @@ export class WebServer {
         : `web:${Math.random().toString(36).slice(2, 10)}`;
     const conversationId = (requestedId || fallbackId).slice(0, 120);
 
-    this.clients.set(ws, { conversationId, unsubscribe: null, pendingUI: new Set() });
+    this.clients.set(ws, { conversationId, unsubscribe: null, pendingUI: new Set(), watchers: new Map() });
 
     const send = (message) => {
       if (ws.readyState === ws.OPEN) {
@@ -679,8 +832,22 @@ export class WebServer {
       entry.pendingUI.clear();
     };
 
+    // B1: تبويبات متوازية — نراقب جلسات التبويبات غير النشطة دون ربطها بالاتصال.
+    const clearWatchers = (entry) => {
+      if (!entry?.watchers?.size) return;
+      for (const unsubscribe of entry.watchers.values()) {
+        try {
+          unsubscribe?.();
+        } catch {
+          /* تجاهل */
+        }
+      }
+      entry.watchers.clear();
+    };
+
     const bind = async (id) => {
       const existing = this.clients.get(ws);
+      clearWatchers(existing);
       existing.unsubscribe?.();
       if (existing.conversationId !== id) cancelPendingDialogs();
       const conversation = this.manager.getOrCreate(id);
@@ -700,6 +867,32 @@ export class WebServer {
         if (entry?.pendingUI && event.expectsResponse && event.requestId) {
           entry.pendingUI.add(event.requestId);
         }
+
+        if (!event.expectsResponse) {
+          logger.debug("ويب: تحديث واجهة إضافة", { conversationId: id, method: event.method });
+          return;
+        }
+        // تشخيص الموافقة: من المسؤول عن عرض النافذة، وهل يوجد عميل أصلاً؟
+        const clients = this.conversationClientCount(id);
+        const rawTitle = String(event.title || event.message || "");
+        const firstLine = rawTitle
+          .split("\n")
+          .map((line) => line.trim())
+          .find(Boolean) || "";
+        logger.info("ويب: بث طلب موافقة", {
+          conversationId: id,
+          method: event.method,
+          title: firstLine.slice(0, 80),
+          clients,
+        });
+        // الجلسة المشتركة قد يعرضها بوت تيليجرام، فلا نطلق تحذيراً مضلّلاً.
+        const telegramShared = !!config.syncWebTelegram && config.sharedSessionId === id;
+        if (clients === 0 && !telegramShared) {
+          logger.warn(
+            `ويب: لا عميل متصل لاستلام الموافقة (${id}). ` +
+              "افتح الصفحة أو حدّثها (Ctrl+Shift+R) ثم أعد المحاولة، أو أرسل /stop للإلغاء.",
+          );
+        }
       });
       existing.conversationId = id;
       existing.unsubscribe = unsubscribe;
@@ -717,6 +910,21 @@ export class WebServer {
         sharedSessionId: config.sharedSessionId,
         syncWebTelegram: config.syncWebTelegram,
       });
+
+      // قد يسبق أول get_messages جاهزية جسر RPC فيعود السجل فارغاً؛
+      // نعيد جلبه بعد لحظة ونرسله إن لم يكن قد وصل.
+      if (!transcript.length) {
+        setTimeout(async () => {
+          try {
+            const fresh = conversation.refreshTranscript
+              ? await conversation.refreshTranscript()
+              : conversation.getTranscript();
+            if (fresh?.length) send({ type: "transcript", transcript: fresh });
+          } catch (err) {
+            logger.debug("ويب: تحديث السجل:", err?.message || err);
+          }
+        }, 900).unref?.();
+      }
     };
 
     bind(conversationId).catch((err) => logger.warn("ويب: فشل الربط:", err?.message || err));
@@ -797,6 +1005,13 @@ export class WebServer {
           case "list_sessions":
             send({ type: "sessions", sessions: this.manager.listConversations() });
             break;
+          case "get_transcript": {
+            const transcript = conversation.refreshTranscript
+              ? await conversation.refreshTranscript()
+              : conversation.getTranscript();
+            send({ type: "transcript", transcript });
+            break;
+          }
           case "restart":
             if (!this.onRestart || !config.supervised) {
               send({ type: "error", message: "إعادة التشغيل متاحة فقط عند التشغيل عبر server.sh." });
@@ -819,6 +1034,11 @@ export class WebServer {
               payload.cancelled = true;
             }
             entry?.pendingUI?.delete(requestId);
+            logger.info("ويب: قرار الموافقة", {
+              conversationId: entry?.conversationId ?? null,
+              requestId,
+              decision: describeUiResponse(payload),
+            });
             await conversation.respondExtensionUI(requestId, payload);
             break;
           }
@@ -827,12 +1047,59 @@ export class WebServer {
             // pi يتجاهل الرد إن كان قد حلّ الحوار تلقائياً بمهلته.
             if (msg.id) {
               entry?.pendingUI?.delete(msg.id);
+              logger.info("ويب: قرار الموافقة", {
+                conversationId: entry?.conversationId ?? null,
+                requestId: msg.id,
+                decision: "dismissed (مهلة/إغلاق محلي)",
+              });
               await conversation.respondExtensionUI(msg.id, { cancelled: true });
             }
             break;
           case "bind":
             await bind(String(msg.conversationId || entry.conversationId));
             break;
+          // ===== B1: تمرير RPC عام مسموح =====
+          case "rpc": {
+            const id = msg.id ?? null;
+            const command = String(msg.command || "").trim();
+            if (!RPC_PASSTHROUGH_COMMANDS.includes(command)) {
+              send({ type: "rpc_error", id, message: `أمر RPC غير مسموح: ${command || "(فارغ)"}` });
+              break;
+            }
+            if (typeof conversation.rpc !== "function") {
+              send({
+                type: "rpc_error",
+                id,
+                message: "جسر RPC غير مفعّل (يتطلب FEATURE_RPC=1).",
+              });
+              break;
+            }
+            try {
+              const data = await conversation.rpc(command, msg.data || {});
+              send({ type: "rpc_result", id, ok: true, data: data ?? null });
+            } catch (err) {
+              send({ type: "rpc_error", id, message: err?.message || String(err) });
+            }
+            break;
+          }
+          // ===== B1: مراقبة تبويبات أخرى (عدّاد غير المقروء + حالة الانشغال) =====
+          case "watch": {
+            clearWatchers(entry);
+            const ids = Array.isArray(msg.conversationIds) ? msg.conversationIds : [];
+            for (const raw of ids.slice(0, 20)) {
+              const id = String(raw || "").slice(0, 120);
+              if (!id || id === entry.conversationId || entry.watchers.has(id)) continue;
+              // لا ننشئ جلسات جديدة (كي لا نشغّل عمليات pi لكل تبويب مخزّن).
+              const watched = this.manager.get(id);
+              if (!watched) continue;
+              entry.watchers.set(
+                id,
+                watched.subscribe((event) => send({ type: "event", conversationId: id, event })),
+              );
+            }
+            send({ type: "watching", conversationIds: [...entry.watchers.keys()] });
+            break;
+          }
           default:
             send({ type: "error", message: `نوع غير معروف: ${msg.type}` });
         }
@@ -844,12 +1111,14 @@ export class WebServer {
     ws.on("close", () => {
       cancelPendingDialogs();
       const entry = this.clients.get(ws);
+      clearWatchers(entry);
       entry?.unsubscribe?.();
       this.clients.delete(ws);
     });
     ws.on("error", () => {
       cancelPendingDialogs();
       const entry = this.clients.get(ws);
+      clearWatchers(entry);
       entry?.unsubscribe?.();
       this.clients.delete(ws);
     });

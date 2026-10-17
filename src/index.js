@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import config from "./config.js";
+import config, { ROOT } from "./config.js";
 import logger from "./logger.js";
 import { JsonStore } from "./store.js";
 import { PiManager } from "./pi-manager.js";
@@ -68,6 +68,31 @@ async function main() {
   if (!config.web.enabled && !telegram.enabled) {
     logger.warn("لا شيء مفعّل. شغّل الويب أو اضبط TELEGRAM_BOT_TOKEN.");
   }
+
+  // إعادة تشغيل مؤجّلة: يكتبها server.sh عندما يُستدعى من داخل الخادم،
+  // فننتظر حتى تنتهي المهام الجارية ثم نعيد التشغيل دون قطع الجلسات.
+  const restartFlag = join(ROOT, ".run", "restart.requested");
+  let restartArmedAt = 0;
+  const restartWatcher = setInterval(() => {
+    if (!existsSync(restartFlag)) {
+      restartArmedAt = 0;
+      return;
+    }
+    if (!restartArmedAt) {
+      restartArmedAt = Date.now();
+      logger.info("طُلب إعادة تشغيل — بانتظار انتهاء المهام الجارية…");
+    }
+    const forced = Date.now() - restartArmedAt > 10 * 60 * 1000;
+    if (!manager.isIdle() && !forced) return;
+    try {
+      rmSync(restartFlag, { force: true });
+    } catch {
+      /* ignore */
+    }
+    clearInterval(restartWatcher);
+    void requestRestart("flag");
+  }, 1000);
+  restartWatcher.unref?.();
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));

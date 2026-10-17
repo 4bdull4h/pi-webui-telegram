@@ -97,6 +97,9 @@ export const config = {
     noSkills: bool(process.env.PI_NO_SKILLS, false),
     tools: list(process.env.PI_TOOLS),
     systemPromptExtra: process.env.PI_SYSTEM_PROMPT_EXTRA || "",
+    // أداة تفويض الوكلاء: تمكين/تعطيل + مهلة (5 دقائق افتراضياً).
+    delegateEnabled: bool(process.env.DELEGATE_ENABLED, true),
+    delegateTimeoutMs: int(process.env.DELEGATE_TIMEOUT_MS, 5 * 60 * 1000),
   },
 
   // جسر RPC (المرحلة A): معطّل افتراضياً. FEATURE_RPC=1 يفعّله.

@@ -154,7 +154,9 @@ class Conversation {
       tools: agent ? agentTools : config.pi.tools.length ? config.pi.tools : undefined,
     };
     if (model) options.model = model;
-    if (agent?.permissions?.delegate) options.customTools = [this.manager.createDelegateTool(this)];
+    if (agent?.permissions?.delegate && config.pi.delegateEnabled) {
+      options.customTools = [this.manager.createDelegateTool(this)];
+    }
 
     let created;
     try {
@@ -509,6 +511,9 @@ export class PiManager {
   }
 
   async runSubAgent({ agentId, task, parentConversationId = "", signal }) {
+    if (!config.pi.delegateEnabled) {
+      throw new Error("التفويض معطّل حالياً (DELEGATE_ENABLED=0). نفّذ المهمة مباشرةً.");
+    }
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`الوكيل غير موجود: ${agentId}`);
     if (!agent.enabled) throw new Error(`الوكيل معطّل: ${agent.name}`);
@@ -586,11 +591,30 @@ export class PiManager {
       session.abort().catch(() => undefined);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+
+    // مهلة أمان: لا ننتظر وكيلاً فرعياً إلى ما لا نهاية.
+    const timeoutMs = config.pi.delegateTimeoutMs;
+    let timedOut = false;
+    const timeoutHandle =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            session.abort().catch(() => undefined);
+          }, timeoutMs)
+        : null;
+    timeoutHandle?.unref?.();
+
     try {
       await session.prompt(task);
+      if (timedOut) {
+        throw new Error(
+          `انتهت مهلة التفويض (${Math.round(timeoutMs / 1000)} ث) وأُلغي الوكيل ${agent.name || agent.id}.`,
+        );
+      }
       const finalText = (session.getLastAssistantText?.() || text || "").trim();
       return { text: finalText || "لم يُرجع الوكيل نصاً.", agent, usage: usageTotal };
     } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       signal?.removeEventListener("abort", onAbort);
       try {
         unsubscribe();
@@ -691,6 +715,14 @@ export class PiManager {
         conversation.dispose();
       }
     }
+  }
+
+  /** هل كل المحادثات غير منشغلة؟ يُستخدم لتأجيل إعادة التشغيل. */
+  isIdle() {
+    for (const conversation of this.conversations.values()) {
+      if (conversation.isBusy) return false;
+    }
+    return true;
   }
 
   listConversations() {

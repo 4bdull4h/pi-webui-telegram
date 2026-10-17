@@ -1,5 +1,8 @@
 /* مساعد Pi — منطق الواجهة العربية RTL */
 
+// بصمة الإصدار تُستبدل بـmtime عند التقديم (انظر src/web-server.js).
+console.info("[pi-webui] build", "__BUILD__");
+
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
@@ -21,6 +24,14 @@ const els = {
   statusBody: $("#statusBody"),
   messages: $("#messages"),
   hero: $("#hero"),
+  tabsBar: $("#tabsBar"),
+  tabsBarWrap: $("#tabsBarWrap"),
+  newTabBtn: $("#newTabBtn"),
+  cmdPanel: $("#cmdPanel"),
+  slashBtn: $("#slashBtn"),
+  approvalsModal: $("#approvalsModal"),
+  approvalsBody: $("#approvalsBody"),
+  approvalsClose: $("#approvalsClose"),
   input: $("#input"),
   sendBtn: $("#sendBtn"),
   stopBtn: $("#stopBtn"),
@@ -57,12 +68,46 @@ const els = {
   controlBtnTop: $("#controlBtnTop"),
   editorStatus: $("#editorStatus"),
   editorWidgets: $("#editorWidgets"),
+  approvalQueue: $("#approvalQueue"),
   extUiDialog: $("#extUiDialog"),
   extUiTitle: $("#extUiTitle"),
   extUiBody: $("#extUiBody"),
   extUiClose: $("#extUiClose"),
   extUiKeysHint: $("#extUiKeysHint"),
   extUiTimer: $("#extUiTimer"),
+  extUiRing: $("#extUiRing"),
+  extUiRingWrap: $("#extUiRingWrap"),
+  extUiLater: $("#extUiLater"),
+  turnProgress: $("#turnProgress"),
+  turnTimer: $("#turnTimer"),
+  soundBtn: $("#soundBtn"),
+  notifyBtn: $("#notifyBtn"),
+  notifyBtnDot: $("#notifyBtnDot"),
+  connBanner: $("#connBanner"),
+  connBannerTitle: $("#connBannerTitle"),
+  connBannerReason: $("#connBannerReason"),
+  connBannerCount: $("#connBannerCount"),
+  connBannerRetry: $("#connBannerRetry"),
+  connBannerDiag: $("#connBannerDiag"),
+  notifyBar: $("#notifyBar"),
+  notifyBarRetry: $("#notifyBarRetry"),
+  notifyBarClose: $("#notifyBarClose"),
+  notifyPanel: $("#notifyPanel"),
+  notifyPanelClose: $("#notifyPanelClose"),
+  notifyMaster: $("#notifyMaster"),
+  notifyVolume: $("#notifyVolume"),
+  notifyVolumeLabel: $("#notifyVolumeLabel"),
+  notifySoundList: $("#notifySoundList"),
+  notifyPermState: $("#notifyPermState"),
+  notifyConnLog: $("#notifyConnLog"),
+  notifyConnClear: $("#notifyConnClear"),
+  notifyExplain: $("#notifyExplain"),
+  notifyExplainAllow: $("#notifyExplainAllow"),
+  notifyExplainLater: $("#notifyExplainLater"),
+  connDiagDialog: $("#connDiagDialog"),
+  connDiagClose: $("#connDiagClose"),
+  connDiagState: $("#connDiagState"),
+  connDiagLog: $("#connDiagLog"),
 };
 
 const THINKING_LABELS = {
@@ -82,6 +127,8 @@ const HERO_HTML = els.hero ? els.hero.outerHTML : "";
 
 const state = {
   conversationId: null,
+  tabs: [],
+  activeTabId: null,
   ws: null,
   connected: false,
   models: [],
@@ -118,13 +165,45 @@ const state = {
     activeIndex: 0,
     countdown: null,
     deadline: 0,
+    titleTimer: null,
+    titleBase: null,
+    hiddenAt: 0,
     statuses: new Map(),
     widgets: new Map(),
     collapsedWidgets: new Set(),
   },
   // B2: مرفقات (رفع + معاينة) وقائمة إكمال المسارات (@).
   attachments: { items: [], seq: 0, uploading: false },
+  // C3: بيانات الحدث الأخير المستخدمة في محتوى إشعارات النظام.
+  alert: { startedAt: 0, reply: "", model: "", agent: "" },
+  // C3: مراقب الاتصال (نبضة /health + تصنيف سبب الانقطاع).
+  conn: {
+    status: "online",
+    reason: null,
+    detail: "",
+    fails: 0,
+    attempt: 0,
+    history: [],
+    retryAt: 0,
+    retryTimer: null,
+    countdownTimer: null,
+    hbTimer: null,
+    latched: [],
+    replayPending: false,
+    lastCode: 0,
+  },
   paths: { open: false, items: [], index: 0, start: 0, end: 0, request: 0, timer: null },
+  // B3: لوحة أوامر / (محلية + خادمية).
+  commands: {
+    open: false,
+    query: "",
+    index: 0,
+    filtered: [],
+    items: [],
+    loaded: false,
+    loading: false,
+    error: null,
+  },
 };
 
 /* ===== أدوات مساعدة ===== */
@@ -140,22 +219,349 @@ function getToken() {
 }
 
 function getConversationId() {
+  if (state.activeTabId) return state.activeTabId;
   const url = new URL(location.href);
   const fromUrl = url.searchParams.get("conversation");
-  if (fromUrl) {
-    localStorage.setItem("pi.conversation", fromUrl);
-    return fromUrl;
+  if (fromUrl) return fromUrl;
+  if (state.config?.sharedSessionId) return state.config.sharedSessionId;
+  return "shared:main";
+}
+
+/* ========================================================================
+ * B1: تبويبات جلسات متوازية
+ * كل تبويب = conversationId مستقل. التبويب الأول دائماً shared:main
+ * (المشترك مع تيليجرام) ولا يُغلق. القائمة والمسودّات والعدّادات في localStorage.
+ * ======================================================================== */
+
+const TABS_STORAGE_KEY = "pi.tabs.v1";
+let tabsPersistTimer = null;
+
+function sharedTabId() {
+  return state.config?.sharedSessionId || "shared:main";
+}
+
+function newTabId() {
+  const uuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `tab:${uuid}`;
+}
+
+function readStoredTabs() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TABS_STORAGE_KEY) || "null");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
   }
-  if (state.config?.syncWebTelegram && state.config?.sharedSessionId) {
-    localStorage.setItem("pi.conversation", state.config.sharedSessionId);
-    return state.config.sharedSessionId;
+}
+
+function tabById(id) {
+  return state.tabs.find((tab) => tab.id === id) || null;
+}
+
+function activeTab() {
+  return tabById(state.activeTabId);
+}
+
+function tabTitle(tab, index = state.tabs.indexOf(tab)) {
+  if (tab.title) return tab.title;
+  if (tab.id === sharedTabId()) return "الجلسة المشتركة";
+  return `جلسة ${index + 1}`;
+}
+
+function ensureTab(id, fallbackTitle = "") {
+  const clean = String(id || "").trim().slice(0, 120);
+  if (!clean) return null;
+  let tab = tabById(clean);
+  if (!tab) {
+    tab = { id: clean, title: fallbackTitle, custom: false, draft: "", unread: 0, busy: false };
+    state.tabs.push(tab);
   }
-  let id = localStorage.getItem("pi.conversation");
-  if (!id || id.startsWith("web:")) {
-    id = `web:${Math.random().toString(36).slice(2, 10)}`;
-    localStorage.setItem("pi.conversation", id);
+  return tab;
+}
+
+function initTabs() {
+  const shared = sharedTabId();
+  const stored = readStoredTabs();
+  const tabs = [];
+  const add = (entry, fallbackTitle = "") => {
+    const id = String(entry?.id || "").trim().slice(0, 120);
+    if (!id || tabs.some((tab) => tab.id === id)) return;
+    tabs.push({
+      id,
+      title: typeof entry?.title === "string" ? entry.title : fallbackTitle,
+      custom: !!entry?.custom,
+      draft: typeof entry?.draft === "string" ? entry.draft : "",
+      unread: Math.max(0, Math.min(99, Number(entry?.unread) || 0)),
+      busy: false,
+    });
+  };
+
+  const storedTabs = Array.isArray(stored?.tabs) ? stored.tabs : [];
+  const storedShared = storedTabs.find((tab) => tab.id === shared);
+  add({ ...(storedShared || {}), id: shared, title: storedShared?.title || "الجلسة المشتركة" });
+  for (const entry of storedTabs) {
+    if (entry?.id === shared) continue;
+    add(entry);
   }
-  return id;
+  // رابط قديم ?conversation=...: يفتح كتبويب إضافي بدل تجاهله.
+  const fromUrl = new URL(location.href).searchParams.get("conversation");
+  if (fromUrl) add({ id: fromUrl, title: "" });
+  // توافق خلفي: محادثة الويب المحفوظة سابقاً تصبح تبويباً بدل أن تضيع.
+  if (!storedTabs.length) {
+    try {
+      const legacy = localStorage.getItem("pi.conversation");
+      if (legacy && legacy !== shared) add({ id: legacy, title: "" });
+    } catch {
+      /* تخزين معطّل — تجاهل */
+    }
+  }
+
+  const preferred = [
+    typeof stored?.activeId === "string" ? stored.activeId : null,
+    fromUrl,
+    shared,
+  ].find((id) => id && tabs.some((tab) => tab.id === id));
+
+  state.tabs = tabs;
+  state.activeTabId = preferred || tabs[0].id;
+  state.conversationId = state.activeTabId;
+  if (els.input) els.input.value = activeTab()?.draft || "";
+  renderTabs();
+  persistTabs(true);
+}
+
+function persistTabs(immediate = false) {
+  const write = () => {
+    try {
+      const payload = {
+        version: 1,
+        activeId: state.activeTabId,
+        tabs: state.tabs.map((tab) => ({
+          id: tab.id,
+          title: tab.title || "",
+          custom: !!tab.custom,
+          draft: tab.draft || "",
+          unread: Number(tab.unread) || 0,
+        })),
+      };
+      localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      /* تخزين ممتلئ أو معطّل — لا نكسر الواجهة */
+    }
+  };
+  if (tabsPersistTimer) {
+    clearTimeout(tabsPersistTimer);
+    tabsPersistTimer = null;
+  }
+  if (immediate) write();
+  else tabsPersistTimer = setTimeout(write, 250);
+}
+
+function saveActiveDraft() {
+  const tab = activeTab();
+  if (!tab || !els.input) return;
+  tab.draft = els.input.value;
+}
+
+function renderTabs() {
+  const box = els.tabsBar;
+  if (!box) return;
+  const scrollLeft = box.scrollLeft;
+  box.replaceChildren();
+  state.tabs.forEach((tab, index) => {
+    const isActive = tab.id === state.activeTabId;
+    const item = document.createElement("div");
+    item.className = `tab${isActive ? " active" : ""}${tab.busy ? " busy" : ""}`;
+    item.dataset.id = tab.id;
+    item.dataset.index = String(index);
+    item.setAttribute("role", "tab");
+    item.setAttribute("aria-selected", isActive ? "true" : "false");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tab-title";
+    button.title = `${tabTitle(tab, index)}\n${tab.id}\n(نقر مزدوج لإعادة التسمية)`;
+
+    const icon = document.createElement("span");
+    icon.className = "tab-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = tab.id === sharedTabId() ? "🔗" : "💬";
+
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.dir = "auto";
+    label.textContent = tabTitle(tab, index);
+
+    button.append(icon, label);
+    if (tab.unread > 0) {
+      const unread = document.createElement("span");
+      unread.className = "tab-unread";
+      unread.textContent = tab.unread > 9 ? "9+" : String(tab.unread);
+      unread.title = `${tab.unread} رسالة/حدث جديد`;
+      button.appendChild(unread);
+    }
+    if (tab.busy) {
+      const busy = document.createElement("span");
+      busy.className = "tab-busy-dot";
+      busy.title = "جارٍ التوليد…";
+      button.appendChild(busy);
+    }
+
+    button.addEventListener("click", () => switchTab(tab.id));
+    button.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      renameTab(tab.id);
+    });
+    item.appendChild(button);
+
+    if (tab.id !== sharedTabId()) {
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "tab-close";
+      close.title = "إغلاق التبويب";
+      close.setAttribute("aria-label", `إغلاق ${tabTitle(tab, index)}`);
+      close.textContent = "×";
+      close.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeTab(tab.id);
+      });
+      item.appendChild(close);
+    }
+    box.appendChild(item);
+  });
+  box.scrollLeft = scrollLeft;
+  // إبقاء التبويب النشط مرئياً أفقياً على الشاشات الضيقة.
+  box.querySelector(".tab.active")?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+}
+
+function sendWatch() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  const conversationIds = state.tabs.map((tab) => tab.id).filter((id) => id !== state.activeTabId);
+  try {
+    state.ws.send(JSON.stringify({ type: "watch", conversationIds }));
+  } catch {
+    /* ignore */
+  }
+}
+
+function switchTab(id, options = {}) {
+  const tab = tabById(id);
+  if (!tab) return;
+  if (id === state.activeTabId && !options.force) return;
+  saveActiveDraft();
+  state.activeTabId = id;
+  state.conversationId = id;
+  tab.unread = 0;
+  // تنظيف عرض التبويب السابق فوراً (لا نعرض رسائل جلسة أخرى أثناء الربط).
+  state.current = null;
+  state.currentTurn = null;
+  state.toolCards.clear();
+  resetExtensionUI();
+  closePathMenu();
+  closeCommandPanel();
+  if (els.messages) {
+    els.messages.innerHTML = "";
+    restoreHero();
+  }
+  if (els.input) els.input.value = tab.draft || "";
+  if (els.sessionBadge) els.sessionBadge.textContent = tabTitle(tab, state.tabs.indexOf(tab));
+  autoResize();
+  setStreaming(!!tab.busy);
+  renderTabs();
+  renderSessions();
+  persistTabs(true);
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    send({ type: "bind", conversationId: id });
+    sendWatch();
+  } else {
+    connect();
+  }
+}
+
+function addTab() {
+  saveActiveDraft();
+  const tab = {
+    id: newTabId(),
+    title: `جلسة ${state.tabs.length + 1}`,
+    custom: true,
+    draft: "",
+    unread: 0,
+    busy: false,
+  };
+  state.tabs.push(tab);
+  switchTab(tab.id);
+  requestAnimationFrame(() => els.input?.focus());
+}
+
+function closeTab(id) {
+  if (id === sharedTabId()) {
+    toast("التبويب المشترك مع تيليجرام لا يُغلق.", "warn");
+    return;
+  }
+  const index = state.tabs.findIndex((tab) => tab.id === id);
+  if (index === -1) return;
+  const wasActive = state.activeTabId === id;
+  state.tabs.splice(index, 1);
+  if (wasActive) {
+    const next = state.tabs[Math.max(0, index - 1)] || state.tabs[0];
+    state.activeTabId = null;
+    switchTab(next.id, { force: true });
+  } else {
+    renderTabs();
+    persistTabs(true);
+    sendWatch();
+  }
+}
+
+function renameTab(id) {
+  const tab = tabById(id);
+  if (!tab) return;
+  const current = tabTitle(tab, state.tabs.indexOf(tab));
+  const value = window.prompt("اسم التبويب", current);
+  if (value === null) return;
+  const clean = String(value).trim().slice(0, 60);
+  tab.title = clean || current;
+  tab.custom = true;
+  renderTabs();
+  persistTabs(true);
+}
+
+/** حدث يصل لتبويب غير نشط (مراقبة): نحدّث العدّاد/الانشغال فقط. */
+function handleBackgroundEvent(conversationId, event) {
+  const tab = tabById(conversationId);
+  if (!tab) return;
+  switch (event.type) {
+    case "run_start":
+      tab.busy = true;
+      break;
+    case "assistant_message":
+    case "settled":
+    case "error":
+      tab.busy = false;
+      tab.unread = Math.min(99, (Number(tab.unread) || 0) + 1);
+      SoundBus.play(event.type === "error" ? "error" : event.type === "settled" ? "done" : "message");
+      if (event.type === "settled") {
+        systemNotify("done", {
+          title: L(`✅ انتهت المهمة في «${tab.title || "تبويب آخر"}»`, "✅ Task finished in another tab"),
+          body: alertBody(L("اكتملت المهمة", "Task completed"), state.alert.reply),
+          tag: `pi-done:${tab.id}`,
+        });
+      }
+      break;
+    case "title_changed":
+      if (event.name && !tab.custom) tab.title = event.name;
+      break;
+    case "session_reset":
+      if (!tab.custom) tab.title = "";
+      break;
+    default:
+      break;
+  }
+  renderTabs();
+  persistTabs();
 }
 
 function toast(message, kind = "") {
@@ -424,11 +830,12 @@ function beginAssistantTurn() {
   thinkingBox.className = "thinking";
   thinkingBox.innerHTML = `<summary>🧠 سلسلة التفكير</summary><div class="thinking-body" dir="auto"></div>`;
   const md = document.createElement("div");
-  md.className = "md";
+  md.className = "md streaming";
   md.dir = "auto";
   const tools = document.createElement("div");
   tools.className = "tools";
   bubble.append(thinkingBox, md, tools);
+  wrap.classList.add("generating");
 
   let raw = "";
   let thinking = "";
@@ -478,6 +885,8 @@ function beginAssistantTurn() {
     },
     finalize() {
       render();
+      wrap.classList.remove("generating");
+      md.classList.remove("streaming");
       thinkingBox.style.display = thinking ? "" : "none";
       const meta = document.createElement("div");
       meta.className = "msg-meta";
@@ -533,11 +942,16 @@ function setStreaming(streaming) {
   state.streaming = streaming;
   els.sendBtn.classList.toggle("hidden", streaming);
   els.stopBtn.classList.toggle("hidden", !streaming);
+  if (streaming) startTurnTimer();
+  else {
+    stopTurnTimer();
+    setTurnProgress("idle");
+  }
   els.composerHint.textContent = streaming
     ? "جارٍ التوليد… يمكنك الإرسال لإضافة توجيه."
-    : state.config?.syncWebTelegram
+    : state.activeTabId === sharedTabId() && state.config?.syncWebTelegram
       ? "🔗 الجلسة مشتركة مع تيليجرام — الطلبات والردود تظهر في المكانين."
-      : "";
+      : "اكتب / لعرض الأوامر والمهارات والقوالب.";
 }
 
 function populateModels() {
@@ -663,6 +1077,7 @@ function permissionChips(agent) {
 function applyAgent(agent) {
   if (!agent) return;
   state.agent = agent;
+  state.alert.agent = `${agent.emoji || "🤖"} ${agent.name || agent.role || agent.id || ""}`.trim();
   if (els.agentBadge) {
     els.agentBadge.textContent = `${agent.emoji || "🤖"} ${agent.name || roleLabel(agent.role)}`;
     els.agentBadge.title = `${roleLabel(agent.role)} — ${agent.description || ""}`;
@@ -754,6 +1169,14 @@ function renderUsage() {
   ctxItem?.classList.remove("warn", "danger");
   const ctxLevel = levelClass(ctxPercent);
   if (ctxLevel) ctxItem?.classList.add(ctxLevel);
+  const worst = Math.max(dailyPercent, weeklyPercent, ctxPercent);
+  const worstLabel =
+    worst === dailyPercent && dailyPercent > 0
+      ? "حد اليوم"
+      : worst === weeklyPercent && weeklyPercent > 0
+        ? "حد الأسبوع"
+        : "سياق الجلسة";
+  maybeLimitAlert(worst, worstLabel);
 }
 
 function showStatus() {
@@ -805,35 +1228,55 @@ function handleConversationEvent(event) {
     case "user_message":
       addUserMessage(event.text, event.source || "web");
       setStreaming(true);
+      setTurnProgress("thinking");
       break;
     case "run_start":
       state.toolCards.clear();
+      state.alert.startedAt = Date.now();
+      state.alert.reply = "";
+      setTurnProgress("thinking");
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       break;
     case "text_delta":
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       state.currentTurn.appendText(event.delta);
+      setTurnProgress("streaming");
       break;
     case "thinking_delta":
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       state.currentTurn.appendThinking(event.delta);
+      if (state.turnState !== "tool") setTurnProgress("thinking");
       break;
     case "tool_start": {
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       const card = state.currentTurn.addTool({ id: event.id, name: event.name, hint: hintFor(event.name, event.args) });
       if (card) state.toolCards.set(event.id, card);
+      setTurnProgress("tool");
       scrollToBottom();
+      break;
+    }
+    case "tool_update": {
+      const card = state.toolCards.get(event.id);
+      const status = card?.querySelector(".t-status");
+      if (status && event.output) status.textContent = event.output;
       break;
     }
     case "tool_end": {
       const card = state.toolCards.get(event.id);
       updateToolCard(card, { output: event.output, isError: event.isError });
+      if (event.isError) {
+        noteAlertSnippet(event.output);
+        SoundBus.play("toolFail");
+      }
+      if (state.streaming) setTurnProgress("streaming");
       break;
     }
     case "assistant_message": {
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       if (event.text) state.currentTurn.setText(event.text);
       state.currentTurn.setUsage(event.usage, event.model);
+      noteAlertSnippet(event.text);
+      if (event.model) state.alert.model = String(event.model);
       if (event.errorMessage) {
         const { bubble } = createMessage("assistant");
         bubble.classList.add("error");
@@ -850,6 +1293,14 @@ function handleConversationEvent(event) {
       }
       setStreaming(false);
       state.toolCards.clear();
+      SoundBus.play("done");
+      systemNotify("done", {
+        title: L("✅ انتهت المهمة", "✅ Task finished"),
+        body: alertBody(L("اكتملت المهمة بنجاح", "Task completed"), state.alert.reply),
+        tag: "pi-done",
+        onClick: () => scrollToBottom(true),
+      });
+      state.alert.startedAt = 0;
       send({ type: "list_sessions" });
       send({ type: "get_usage" });
       scheduleControlRefresh();
@@ -862,6 +1313,14 @@ function handleConversationEvent(event) {
         state.currentTurn = null;
       }
       setStreaming(false);
+      noteAlertSnippet(event.message);
+      SoundBus.play("error");
+      systemNotify("error", {
+        title: L("❌ خطأ", "❌ Error"),
+        body: alertBody(L("فشلت المهمة", "Task failed"), event.message),
+        tag: "pi-error",
+        requireInteraction: true,
+      });
       break;
     case "compaction_start":
       addNotice("🗜️ جارٍ ضغط السياق…");
@@ -873,7 +1332,11 @@ function handleConversationEvent(event) {
       addNotice(`↻ إعادة المحاولة ${event.attempt}/${event.maxAttempts}…`);
       break;
     case "retry_end":
-      if (!event.success) addErrorMessage(event.finalError || "فشلت إعادة المحاولة");
+      if (!event.success) {
+        addErrorMessage(event.finalError || "فشلت إعادة المحاولة");
+        noteAlertSnippet(event.finalError);
+        SoundBus.play("error");
+      }
       break;
     case "model_changed":
       if (state.current) {
@@ -897,8 +1360,7 @@ function handleConversationEvent(event) {
       state.contextUsage = event.usage || null;
       if (state.current) state.current.contextUsage = event.usage || null;
       renderUsage();
-      break;
-    case "session_ready":
+      break;    case "session_ready":
       if (event.state) applyState(event.state);
       break;
     case "session_reset":
@@ -909,6 +1371,15 @@ function handleConversationEvent(event) {
       state.currentTurn = null;
       state.toolCards.clear();
       setStreaming(false);
+      {
+        const tab = activeTab();
+        if (tab) {
+          tab.busy = false;
+          if (!tab.custom) tab.title = "";
+          renderTabs();
+          persistTabs(true);
+        }
+      }
       const current = state.sessions.find((session) => session.id === state.conversationId);
       if (current) {
         current.title = null;
@@ -924,6 +1395,12 @@ function handleConversationEvent(event) {
         if (current) {
           current.title = event.name;
           renderSessions();
+        }
+        const tab = activeTab();
+        if (tab && !tab.custom) {
+          tab.title = event.name;
+          renderTabs();
+          persistTabs();
         }
       }
       break;
@@ -956,9 +1433,15 @@ function applySyncBadge() {
 
 function handleServerMessage(message) {
   switch (message.type) {
-    case "ready":
+    case "ready": {
       state.conversationId = message.conversationId;
-      localStorage.setItem("pi.conversation", message.conversationId);
+      const tab = ensureTab(message.conversationId, "");
+      if (tab) {
+        state.activeTabId = tab.id;
+        tab.unread = 0;
+        tab.busy = !!message.state?.isStreaming;
+        if (message.state?.title && !tab.custom) tab.title = message.state.title;
+      }
       if (message.syncWebTelegram !== undefined) {
         state.config = {
           ...(state.config || {}),
@@ -985,11 +1468,28 @@ function handleServerMessage(message) {
       }
       renderTranscript(message.transcript || []);
       applyState(message.state);
+      if (tab) {
+        // استعادة مسودة كل تبويب وحالة الانشغال/العدّاد بعد الربط.
+        els.input.value = tab.draft || "";
+        autoResize();
+        setStreaming(!!message.state?.isStreaming);
+      }
+      renderTabs();
+      persistTabs(true);
+      sendWatch();
       setConnected(true);
       resetExtensionUI();
+      replayLatchedApprovals();
+      renderConnHistory();
       break;
+    }
     case "state":
       applyState(message.state);
+      if (Array.isArray(message.transcript)) {
+        els.messages.innerHTML = "";
+        if (!message.transcript.length) restoreHero();
+        else renderTranscript(message.transcript);
+      }
       break;
     case "models":
       state.models = message.models || [];
@@ -999,6 +1499,13 @@ function handleServerMessage(message) {
       state.sessions = message.sessions || [];
       renderSessions();
       break;
+    case "transcript": {
+      // يُرسل بعد ready عند تأخر جاهزية الجسر — نطبّقه فقط إن كانت الواجهة فارغة.
+      if (els.messages.querySelector(".msg") || !message.transcript?.length) break;
+      els.messages.innerHTML = "";
+      renderTranscript(message.transcript);
+      break;
+    }
     case "agents":
       state.agents = message.agents || [];
       populateAgents();
@@ -1032,12 +1539,35 @@ function handleServerMessage(message) {
       break;
     case "notice":
       addNotice(message.message);
+      SoundBus.play("message");
       break;
     case "error":
       addErrorMessage(message.message);
       break;
     case "event":
+      if (message.conversationId && message.conversationId !== state.conversationId) {
+        handleBackgroundEvent(message.conversationId, message.event);
+        break;
+      }
       handleConversationEvent(message.event);
+      break;
+    case "rpc_result": {
+      const pending = rpcPending.get(message.id);
+      if (!pending) break;
+      rpcPending.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve(message.data ?? null);
+      break;
+    }
+    case "rpc_error": {
+      const pending = rpcPending.get(message.id);
+      if (!pending) break;
+      rpcPending.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message.message || "فشل أمر RPC"));
+      break;
+    }
+    case "watching":
       break;
     case "extension_ui":
       handleExtensionUI(message.request);
@@ -1059,7 +1589,7 @@ function restoreHero() {
 const EXT_UI_KEYBOARD_HINT = "Enter للتأكيد · Esc للإلغاء · 1-9 اختيار سريع";
 
 function extensionUiDialogOpen() {
-  return !!state.extUi.current;
+  return !!state.extUi.current && !!els.extUiDialog?.open;
 }
 
 function resetExtensionUI() {
@@ -1073,14 +1603,975 @@ function resetExtensionUI() {
   ui.options = [];
   ui.activeIndex = 0;
   ui.deadline = 0;
-  els.extUiDialog?.classList.add("hidden");
+  closeExtDialog();
+  stopTitleFlash();
   if (els.extUiTimer) els.extUiTimer.textContent = "";
+  els.extUiRingWrap?.classList.add("hidden");
+  renderApprovalQueue();
 }
 
 function notifyToastKind(type) {
   if (type === "error") return "error";
   if (type === "warning" || type === "warn") return "warn";
   return "";
+}
+
+/* ===== C2: حوار أصلي + تنبيهات الوصول + حيوية ===== */
+
+/** نص مترجم بسيط: العربية افتراضاً، الإنجليزية عند <html lang="en">. */
+const L = (ar, en) => (document.documentElement.lang === "en" ? en : ar);
+/* ===== إعدادات التنبيهات الموحّدة — تُحفظ كلها تحت مفتاح واحد ===== */
+const NOTIFY_SETTINGS_KEY = "piweb.notify.settings";
+const NOTIFY_DEFAULT_VOLUME = 70;
+const NOTIFY_TYPE_IDS = ["approval", "done", "error", "toolFail", "disconnected", "reconnected", "message", "limit"];
+
+/** يقرأ الإعدادات الموحّدة (ويهاجر مرة واحدة من مفاتيح C2/C3 القديمة). */
+function readNotifySettings() {
+  const fallback = { sound: true, volume: NOTIFY_DEFAULT_VOLUME, types: {} };
+  try {
+    const raw = localStorage.getItem(NOTIFY_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return fallback;
+      const volume = Number(parsed.volume);
+      return {
+        sound: parsed.sound !== false,
+        volume: Number.isFinite(volume) ? Math.max(0, Math.min(100, volume)) : NOTIFY_DEFAULT_VOLUME,
+        types: parsed.types && typeof parsed.types === "object" ? { ...parsed.types } : {},
+      };
+    }
+    const migrated = { ...fallback, types: {} };
+    migrated.sound = localStorage.getItem("pi.extUi.sound") !== "off";
+    const legacyVolume = Number(localStorage.getItem("pi.alert.volume"));
+    if (Number.isFinite(legacyVolume) && localStorage.getItem("pi.alert.volume") !== null) {
+      migrated.volume = Math.max(0, Math.min(100, legacyVolume));
+    }
+    for (const id of NOTIFY_TYPE_IDS) {
+      if (localStorage.getItem(`pi.alert.sound.${id}`) === "off") migrated.types[id] = false;
+    }
+    return migrated;
+  } catch {
+    return fallback;
+  }
+}
+
+/** يخزّن الإعدادات كاملة تحت `piweb.notify.settings`. */
+function writeNotifySettings(next) {
+  try {
+    localStorage.setItem(NOTIFY_SETTINGS_KEY, JSON.stringify(next));
+  } catch {
+    /* التخزين قد يكون معطّلاً */
+  }
+  return next;
+}
+
+/** يعدّل حقلاً/حقولاً ويحفظ. */
+function patchNotifySettings(patch) {
+  return writeNotifySettings({ ...readNotifySettings(), ...patch });
+}
+
+const SOUND_KEY = NOTIFY_SETTINGS_KEY;
+const APPROVAL_TAG = "pi-ext-ui-approval";
+const NOTIFY_BASE_TITLE = document.title;
+
+function reducedMotion() {
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+function soundEnabled() {
+  return readNotifySettings().sound;
+}
+
+function setSoundEnabled(enabled) {
+  patchNotifySettings({ sound: !!enabled });
+}
+
+/** نغمة تنبيه الطلب — تُفوَّض إلى محرّك الأصوات الموحّد (C3). */
+function playChime() {
+  return SoundBus.play("approval");
+}
+
+function pendingApprovalCount() {
+  return (state.extUi.current ? 1 : 0) + state.extUi.queue.length;
+}
+
+function approvalSummary(request) {
+  const title = String(request?.title || request?.method || "");
+  const detail =
+    request?.message && request.message !== request.title ? String(request.message) : String(request?.preview || "");
+  const line = detail.split("\n").find((part) => part.trim()) || "";
+  const text = [title, line.trim()].filter(Boolean).join(" — ");
+  return text.length > 130 ? `${text.slice(0, 127)}…` : text;
+}
+
+function startTitleFlash() {
+  const ui = state.extUi;
+  if (ui.titleTimer) return;
+  ui.titleBase = ui.titleBase || document.title;
+  const counter = pendingApprovalCount();
+  const label = `(${counter}) ${L("🔐 موافقة مطلوبة", "🔐 Approval needed")}`;
+  let shown = false;
+  const tick = () => {
+    shown = !shown;
+    document.title = shown ? label : ui.titleBase;
+  };
+  tick();
+  ui.titleTimer = setInterval(tick, 900);
+}
+
+function stopTitleFlash() {
+  const ui = state.extUi;
+  if (ui.titleTimer) {
+    clearInterval(ui.titleTimer);
+    ui.titleTimer = null;
+  }
+  document.title = ui.titleBase || NOTIFY_BASE_TITLE;
+  ui.titleBase = null;
+}
+
+/** إشعار نظام للموافقة — دائمًا (ولو كانت الصفحة مرئية) مع tag ثابت لكل طلب. */
+function notifyApproval(request) {
+  const id = String(request?.id || "unknown");
+  return systemNotify("approval", {
+    title: L("🔐 موافقة مطلوبة", "🔐 Approval required"),
+    body: alertBody(L("بانتظار موافقتك", "Waiting for your approval"), approvalSummary(request)),
+    tag: `approval:${id}`,
+    requireInteraction: true,
+    onClick: () => {
+      try {
+        if (state.extUi.current?.id === request?.id) openExtDialog();
+        else {
+          const target = els.approvalQueue?.querySelector("[data-request-id]");
+          target?.scrollIntoView({ block: "center" });
+        }
+      } catch {
+        /* المتصفح قد يمنع التركيز */
+      }
+    },
+  });
+}
+
+let notifyArmed = false;
+/** عرض شرح مختصر مرة واحدة عند أول تفاعل، ثم طلب صلاحية الإشعارات. */
+function armNotifications() {
+  if (notifyArmed) return;
+  notifyArmed = true;
+  try {
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "default") {
+      syncNotifyBar();
+      return;
+    }
+    let explained = false;
+    try {
+      explained = localStorage.getItem(NOTIFY_EXPLAINED_KEY) === "1";
+    } catch {
+      explained = false;
+    }
+    if (explained) {
+      void requestNotifyPermission();
+      return;
+    }
+    const dialog = els.notifyExplain;
+    if (dialog && typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+    else void requestNotifyPermission();
+  } catch {
+    /* تجاهل */
+  }
+}
+
+document.addEventListener("pointerdown", armNotifications, { once: true, passive: true });
+
+function announceApproval(request) {
+  renderApprovalQueue();
+  startTitleFlash();
+  notifyApproval(request);
+  SoundBus.play("approval");
+  if (!reducedMotion()) {
+    try {
+      navigator.vibrate?.(90);
+    } catch {
+      /* الاهتزاز غير مدعوم */
+    }
+  }
+}
+
+function stickyToast(message) {
+  if (!els.toasts) return;
+  const node = document.createElement("div");
+  node.className = "toast warn";
+  node.textContent = message;
+  node.style.cursor = "pointer";
+  node.title = L("اضغط للإغلاق", "Click to dismiss");
+  node.addEventListener("click", () => node.remove());
+  els.toasts.appendChild(node);
+}
+
+/* ===== C3: محرّك أصوات موحّد + إشعارات نظام + مراقبة الاتصال ===== */
+
+const NOTIFY_EXPLAINED_KEY = "pi.notify.explained";
+
+/** جدول أنواع الأصوات (يُعرض في لوحة الإشعارات). */
+const SOUND_TYPES = [
+  { id: "approval", name: "موافقة مطلوبة", desc: "نغمتان صاعدتان حادّتان مكرّرتان 3 مرات — الأكثر إلحاحاً." },
+  { id: "done", name: "انتهت المهمة", desc: "ثلاثية صاعدة هادئة (523→659→784)." },
+  { id: "error", name: "فشل المهمة / خطأ نموذج", desc: "نزول منخفض بموجة sawtooth." },
+  { id: "toolFail", name: "فشل أداة", desc: "نقرتان قصيرتان منخفضتان." },
+  { id: "disconnected", name: "انقطاع الخادم", desc: "نبض منخفض متكرر 4 مرات." },
+  { id: "reconnected", name: "عاد الاتصال", desc: "نغمة صاعدة ثم هادئة." },
+  { id: "message", name: "رسالة جديدة", desc: "نقرة خفيفة جداً." },
+  { id: "limit", name: "اقتراب الحد", desc: "نغمة تحذيرية متوسطة (الاستهلاك/السياق)." },
+];
+
+/**
+ * بصمات صوتية مولّدة بـWebAudio (بلا ملفات صوت).
+ * كل نغمة: { f: تردد، t: بداية (ث)، d: مدة، w: موجة، g: كسب نسبي، to: انزلاق ترددي }.
+ */
+const SOUND_PATTERNS = {
+  approval: [0, 1, 2].flatMap((round) => {
+    const base = round * 0.24;
+    return [
+      { f: 1046, t: base, d: 0.085, w: "square", g: 0.3 },
+      { f: 1568, t: base + 0.1, d: 0.085, w: "square", g: 0.26 },
+    ];
+  }),
+  done: [
+    { f: 523, t: 0, d: 0.18, w: "sine", g: 0.48 },
+    { f: 659, t: 0.15, d: 0.18, w: "sine", g: 0.46 },
+    { f: 784, t: 0.3, d: 0.26, w: "sine", g: 0.4 },
+  ],
+  error: [
+    { f: 330, t: 0, d: 0.18, w: "sawtooth", g: 0.34, to: 247 },
+    { f: 247, t: 0.17, d: 0.2, w: "sawtooth", g: 0.32, to: 165 },
+    { f: 165, t: 0.36, d: 0.3, w: "sawtooth", g: 0.3, to: 110 },
+  ],
+  toolFail: [
+    { f: 220, t: 0, d: 0.07, w: "square", g: 0.26 },
+    { f: 196, t: 0.11, d: 0.07, w: "square", g: 0.24 },
+  ],
+  disconnected: [0, 1, 2, 3].map((i) => ({ f: 196, t: i * 0.26, d: 0.13, w: "triangle", g: 0.32 })),
+  reconnected: [
+    { f: 523, t: 0, d: 0.2, w: "triangle", g: 0.36, to: 784 },
+    { f: 659, t: 0.24, d: 0.26, w: "sine", g: 0.26, to: 587 },
+  ],
+  message: [{ f: 1175, t: 0, d: 0.045, w: "sine", g: 0.16 }],
+  limit: [
+    { f: 880, t: 0, d: 0.13, w: "triangle", g: 0.3 },
+    { f: 660, t: 0.15, d: 0.18, w: "triangle", g: 0.28 },
+  ],
+};
+
+/** محرّك الأصوات الموحّد: نصميم/توليد/كتم/مستوى + فتح AudioContext عند أول تفاعل. */
+const SoundBus = {
+  ctx: null,
+  history: [],
+  _retry: null,
+
+  volume() {
+    return Math.max(0, Math.min(100, Number(readNotifySettings().volume)));
+  },
+
+  setVolume(value) {
+    const next = Math.max(0, Math.min(100, Number(value) || 0));
+    patchNotifySettings({ volume: next });
+    return next;
+  },
+
+  typeEnabled(id) {
+    return readNotifySettings().types[id] !== false;
+  },
+
+  setTypeEnabled(id, enabled) {
+    const settings = readNotifySettings();
+    settings.types[id] = !!enabled;
+    writeNotifySettings(settings);
+  },
+
+  /** يفتح/يستأنف AudioContext (سياسة المتصفح: يتطلب تفاعلاً). */
+  unlock() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      if (!SoundBus.ctx) SoundBus.ctx = new Ctx();
+      if (SoundBus.ctx.state === "suspended") {
+        SoundBus.ctx.resume().catch(() => {});
+      }
+      return SoundBus.ctx;
+    } catch {
+      return null;
+    }
+  },
+
+  /** بصمة النوع (بيانات وصفية يستخدمها الاختبار والتشخيص). */
+  plan(id) {
+    return (SOUND_PATTERNS[id] || []).map((tone) => ({ ...tone }));
+  },
+
+  play(id) {
+    if (!SOUND_PATTERNS[id]) return false;
+    SoundBus.history.unshift({ id, t: Date.now() });
+    SoundBus.history = SoundBus.history.slice(0, 40);
+    if (!soundEnabled() || !SoundBus.typeEnabled(id)) return false;
+    const volume = SoundBus.volume();
+    if (volume <= 0) return false;
+    const ctx = SoundBus.unlock();
+    if (!ctx) return false;
+    if (ctx.state === "suspended") {
+      // إعادة محاولة تلقائية بعد أن يسمح المتصفح بالتشغيل.
+      clearTimeout(SoundBus._retry);
+      SoundBus._retry = setTimeout(() => SoundBus.play(id), 350);
+      return false;
+    }
+    try {
+      const master = (volume / 100) * 0.9;
+      const now = ctx.currentTime + 0.02;
+      for (const tone of SOUND_PATTERNS[id]) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = tone.w || "sine";
+        const t0 = now + (tone.t || 0);
+        const dur = tone.d || 0.1;
+        osc.frequency.setValueAtTime(tone.f, t0);
+        if (tone.to) osc.frequency.exponentialRampToValueAtTime(Math.max(40, tone.to), t0 + dur);
+        const peak = Math.max(0.0004, (tone.g ?? 0.3) * master);
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.exponentialRampToValueAtTime(peak, t0 + Math.min(0.015, dur / 3));
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + dur + 0.03);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+/** فتح المحرّك عند أول تفاعل حقيقي (نقرة/لمسة/مفتاح). */
+function unlockAudioOnce() {
+  const ctx = SoundBus.unlock();
+  if (ctx && ctx.state !== "suspended") {
+    document.removeEventListener("pointerdown", unlockAudioOnce, true);
+    document.removeEventListener("keydown", unlockAudioOnce, true);
+  }
+}
+document.addEventListener("pointerdown", unlockAudioOnce, { capture: true, passive: true });
+document.addEventListener("keydown", unlockAudioOnce, { capture: true });
+
+/* --- إشعارات النظام --- */
+
+function notifySupported() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function notifyPermission() {
+  if (!notifySupported()) return "unsupported";
+  return Notification.permission;
+}
+
+/** نص جسم الإشعار الموحّد: الحالة · المدة · الوكيل/النموذج · مقتطف. */
+function alertBody(status, snippet) {
+  const parts = [status];
+  const started = state.alert.startedAt || turnStartedAt || 0;
+  if (started) {
+    const seconds = Math.max(0, Math.round((Date.now() - started) / 1000));
+    parts.push(seconds >= 60 ? `المدة ${formatClock(seconds)}` : `المدة ${seconds} ث`);
+  }
+  const model = state.alert.model || (state.current ? `${state.current.provider}/${state.current.model}` : "");
+  const agent = state.alert.agent || agentDisplayName(state.current?.agent?.id || state.agent?.id || "");
+  const who = [agent, model].filter(Boolean).join(" · ");
+  if (who) parts.push(who);
+  const text = String(snippet || state.alert.reply || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text) parts.push(text.length > 80 ? `${text.slice(0, 80)}…` : text);
+  return parts.join(" · ");
+}
+
+/** إشعار نظام مع نقر يُركّز النافذة ويستدعي onClick. */
+function systemNotify(kind, { title, body, tag, requireInteraction = false, onClick } = {}) {
+  if (!notifySupported()) return null;
+  if (Notification.permission !== "granted") {
+    syncNotifyBar();
+    return null;
+  }
+  try {
+    const note = new Notification(title || L("مساعد Pi", "Pi assistant"), {
+      body: body || "",
+      tag: tag || `pi-${kind}`,
+      renotify: !!tag,
+      silent: true,
+      requireInteraction: !!requireInteraction,
+      dir: "rtl",
+      lang: document.documentElement.lang || "ar",
+      icon: "/favicon.svg",
+    });
+    note.onclick = () => {
+      try {
+        window.focus();
+        onClick?.();
+      } catch {
+        /* المتصفح قد يمنع التركيز */
+      }
+      note.close();
+    };
+    return note;
+  } catch {
+    return null;
+  }
+}
+
+async function requestNotifyPermission() {
+  if (!notifySupported()) return "unsupported";
+  if (Notification.permission !== "default") {
+    syncNotifyBar();
+    return Notification.permission;
+  }
+  try {
+    localStorage.setItem(NOTIFY_EXPLAINED_KEY, "1");
+  } catch {
+    /* تجاهل */
+  }
+  try {
+    const result = await Notification.requestPermission();
+    syncNotifyBar();
+    renderNotifyPermState();
+    return result;
+  } catch {
+    syncNotifyBar();
+    return Notification.permission;
+  }
+}
+
+function syncNotifyBar() {
+  if (!els.notifyBar) return;
+  const denied = notifySupported() && Notification.permission === "denied";
+  els.notifyBar.classList.toggle("hidden", !denied);
+  els.notifyBtnDot?.classList.toggle("hidden", !denied);
+}
+
+function renderNotifyPermState() {
+  if (!els.notifyPermState) return;
+  const permission = notifyPermission();
+  const label =
+    permission === "granted"
+      ? L("✅ الإشعارات مسموحة", "✅ Notifications allowed")
+      : permission === "denied"
+        ? L("⛔ الإشعارات مرفوضة — فعّلها من إعدادات المتصفح", "⛔ Notifications blocked — enable them in browser settings")
+        : permission === "unsupported"
+          ? L("⚠️ هذا المتصفح لا يدعم الإشعارات", "⚠️ This browser does not support notifications")
+          : L("🔔 لم تُطلب الصلاحية بعد", "🔔 Permission not requested yet");
+  els.notifyPermState.innerHTML = `<span>${escapeHtml(label)}</span>`;
+  if (permission === "default" || permission === "denied") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "c3-mini-btn";
+    btn.textContent = L("إعادة الطلب", "Request again");
+    btn.addEventListener("click", () => {
+      const dialog = els.notifyExplain;
+      if (permission === "default" && dialog && typeof dialog.showModal === "function") dialog.showModal();
+      else void requestNotifyPermission();
+    });
+    els.notifyPermState.appendChild(btn);
+  }
+}
+
+/* --- مراقبة الاتصال وتشخيص السبب --- */
+
+const CONN_REASONS = {
+  "server-restart": {
+    title: "الخادم يُعاد تشغيله",
+    text: "أغلق الخادم الاتصال من جهته (إعادة تشغيل أو صيانة). سنعيد الاتصال تلقائياً.",
+  },
+  network: {
+    title: "لا يوجد اتصال بالشبكة",
+    text: "جهازك غير متصل بالإنترنت الآن. سنعيد المحاولة فور عودة الشبكة.",
+  },
+  auth: {
+    title: "فشل التحقق من الجلسة",
+    text: "رمز الدخول غير صالح أو منتهٍ. أعد تحميل الصفحة أو افتح الرابط الذي يحتوي token.",
+  },
+  timeout: {
+    title: "لا ردّ من الخادم",
+    text: "الخادم لم يستجب خلال 5 ثوانٍ. قد يكون مشغولاً أو متوقفاً.",
+  },
+  unknown: {
+    title: "انقطع الاتصال بالخادم",
+    text: "سبب غير معروف. سنعيد المحاولة تلقائياً.",
+  },
+};
+
+const CONN_KIND_LABELS = {
+  open: "اتصال مفتوح",
+  close: "انقطاع",
+  heartbeat: "نبضة /health",
+  retry: "محاولة إعادة",
+  recover: "استعادة",
+  offline: "المتصفح offline",
+  online: "المتصفح online",
+};
+
+function logConn(kind, { code = null, reason = "", detail = "" } = {}) {
+  state.conn.history.unshift({ t: Date.now(), kind, code, reason, detail });
+  state.conn.history = state.conn.history.slice(0, 20);
+  renderConnHistory();
+}
+
+function connReasonMeta(reason) {
+  return CONN_REASONS[reason] || CONN_REASONS.unknown;
+}
+
+/** تصنيف سبب الانقطاع من رمز إغلاق WS + حالة الشبكة. */
+function classifyClose(code) {
+  const numeric = Number(code);
+  if ([1001, 1012, 1013].includes(numeric) || numeric === 1000) return "server-restart";
+  if (numeric === 1008 || numeric === 4401 || numeric === 4403) return "auth";
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return "network";
+  return "unknown";
+}
+
+function renderConnBanner() {
+  const banner = els.connBanner;
+  if (!banner) return;
+  const down = state.conn.status === "down";
+  banner.classList.toggle("hidden", !down);
+  document.body.classList.toggle("conn-down", down);
+  if (!down) {
+    stopConnCountdown();
+    return;
+  }
+  const meta = connReasonMeta(state.conn.reason);
+  banner.dataset.reason = state.conn.reason || "unknown";
+  if (els.connBannerTitle) els.connBannerTitle.textContent = meta.title;
+  if (els.connBannerReason) {
+    els.connBannerReason.textContent = state.conn.detail ? `${meta.text} (${state.conn.detail})` : meta.text;
+  }
+  updateConnCountdown();
+}
+
+function updateConnCountdown() {
+  if (!els.connBannerCount) return;
+  if (state.conn.status !== "down") {
+    els.connBannerCount.textContent = "";
+    return;
+  }
+  const left = state.conn.retryAt ? Math.max(0, Math.ceil((state.conn.retryAt - Date.now()) / 1000)) : 0;
+  els.connBannerCount.textContent = state.conn.retryAt ? `إعادة المحاولة خلال ${left}s` : "جارٍ المحاولة…";
+}
+
+function stopConnCountdown() {
+  if (state.conn.countdownTimer) {
+    clearInterval(state.conn.countdownTimer);
+    state.conn.countdownTimer = null;
+  }
+  if (els.connBannerCount) els.connBannerCount.textContent = "";
+}
+
+function startConnCountdown() {
+  stopConnCountdown();
+  updateConnCountdown();
+  state.conn.countdownTimer = setInterval(updateConnCountdown, 500);
+}
+
+function clearRetryTimers() {
+  if (state.conn.retryTimer) {
+    clearTimeout(state.conn.retryTimer);
+    state.conn.retryTimer = null;
+  }
+  state.conn.retryAt = 0;
+  stopConnCountdown();
+}
+
+function renderConnHistory() {
+  const targets = [els.notifyConnLog, els.connDiagLog].filter(Boolean);
+  if (!targets.length) return;
+  const rows = state.conn.history.length
+    ? state.conn.history
+        .map((entry) => {
+          const time = new Date(entry.t).toLocaleTimeString("en-GB", { hour12: false });
+          const kind = CONN_KIND_LABELS[entry.kind] || entry.kind;
+          const code = entry.code ? `#${entry.code}` : "—";
+          const reason = entry.reason ? connReasonMeta(entry.reason).title : entry.detail || "—";
+          return `<tr><td dir="ltr">${escapeHtml(time)}</td><td>${escapeHtml(kind)}</td><td dir="ltr">${escapeHtml(code)}</td><td>${escapeHtml(reason)}</td></tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="4" class="c3-empty">لا أحداث بعد</td></tr>`;
+  const table = `<table class="c3-table"><thead><tr><th>الوقت</th><th>الحدث</th><th>الرمز</th><th>السبب</th></tr></thead><tbody>${rows}</tbody></table>`;
+  for (const node of targets) node.innerHTML = table;
+  if (els.connDiagState) {
+    const meta = connReasonMeta(state.conn.reason);
+    els.connDiagState.innerHTML =
+      state.conn.status === "down"
+        ? `<b>⚠️ ${escapeHtml(meta.title)}</b> — ${escapeHtml(meta.text)} · آخر رمز إغلاق: <code dir="ltr">${escapeHtml(String(state.conn.lastCode || "—"))}</code> · محاولة إعادة الاتصال #${state.conn.attempt}`
+        : `<b>✅ متصل</b> — النبضة الدورية كل 15 ثانية عبر <code dir="ltr">/health</code> · ${escapeHtml(String(state.conn.history.length))} حدث في السجل`;
+  }
+}
+
+function latchApprovals() {
+  const current = state.extUi.current;
+  if (current) state.conn.latched.push(current);
+  for (const request of state.extUi.queue) state.conn.latched.push(request);
+  state.conn.latched = state.conn.latched.slice(-5);
+}
+
+function replayLatchedApprovals() {
+  if (!state.conn.replayPending) return;
+  state.conn.replayPending = false;
+  const latched = state.conn.latched.splice(0);
+  if (!latched.length) return;
+  for (const request of latched) {
+    request.replayed = true;
+    state.extUi.queue.push(request);
+  }
+  showNextExtensionDialog();
+  renderApprovalQueue();
+  startTitleFlash();
+  stickyToast(L("🔄 أُعيد عرض طلب موافقة معلّق بعد إعادة الاتصال.", "🔄 Pending approval restored after reconnect."));
+}
+
+function scheduleReconnect(delayOverride) {
+  if (manualClose) return;
+  clearRetryTimers();
+  const delay = Number.isFinite(delayOverride) ? delayOverride : Math.min(1000 * 2 ** state.conn.attempt, 30000);
+  state.conn.attempt += 1;
+  state.reconnectDelay = delay;
+  state.conn.retryAt = Date.now() + delay;
+  logConn("retry", { detail: `خلال ${Math.round(delay / 1000)}s` });
+  startConnCountdown();
+  state.conn.retryTimer = setTimeout(async () => {
+    state.conn.retryTimer = null;
+    state.conn.retryAt = 0;
+    if (manualClose) return;
+    try {
+      await loadConfig();
+    } catch {
+      /* تجاهل: نُكمل محاولة الاتصال */
+    }
+    connect();
+  }, delay);
+}
+
+async function probeReason() {
+  if (state.conn.status !== "down") return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch("/health", { cache: "no-store", signal: controller.signal });
+    if (res.ok) {
+      state.conn.fails = 0;
+      if (state.ws?.readyState !== WebSocket.OPEN) connect();
+      return;
+    }
+    throw new Error(`HTTP ${res.status}`);
+  } catch {
+    const reason = typeof navigator !== "undefined" && navigator.onLine === false ? "network" : "timeout";
+    if (state.conn.reason === "unknown") {
+      state.conn.reason = reason;
+      renderConnBanner();
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** انتقال إلى حالة «منقطع»: شريط + صوت + إشعار + إعادة محاولة بتراجع أسّي. */
+function connDown(reason, { code = null, detail = "" } = {}) {
+  const wasDown = state.conn.status === "down";
+  state.conn.status = "down";
+  state.conn.reason = reason;
+  state.conn.detail = detail;
+  state.conn.lastCode = code ?? state.conn.lastCode;
+  logConn("close", { code, reason, detail });
+  latchApprovals();
+  renderConnBanner();
+  if (!wasDown) {
+    SoundBus.play("disconnected");
+    systemNotify("disconnected", {
+      title: L(`⚠️ ${connReasonMeta(reason).title}`, `⚠️ ${connReasonMeta(reason).title}`),
+      body: alertBody(connReasonMeta(reason).title, state.alert.reply),
+      tag: "pi-connection",
+      requireInteraction: true,
+      onClick: () => els.connBannerDiag?.click(),
+    });
+  }
+  scheduleReconnect();
+  if (reason === "unknown") setTimeout(probeReason, 800);
+}
+
+/** عودة الاتصال: صوت + إشعار + إعادة bind + إعادة عرض موافقة معلّقة. */
+function connUp() {
+  const wasDown = state.conn.status === "down";
+  state.conn.status = "online";
+  state.conn.reason = null;
+  state.conn.detail = "";
+  state.conn.fails = 0;
+  state.conn.attempt = 0;
+  clearRetryTimers();
+  logConn("open");
+  renderConnBanner();
+  renderConnHistory();
+  if (!wasDown) return;
+  logConn("recover");
+  SoundBus.play("reconnected");
+  systemNotify("reconnected", {
+    title: L("✅ عاد الاتصال بالخادم", "✅ Server connection restored"),
+    body: alertBody(L("متصل من جديد", "Back online"), state.alert.reply),
+    tag: "pi-connection",
+  });
+  state.conn.replayPending = state.conn.latched.length > 0;
+  send({ type: "bind", conversationId: getConversationId() });
+  send({ type: "list_sessions" });
+  send({ type: "get_usage" });
+}
+
+/** نبضة دورية كل 15 ثانية مع مهلة 5 ثوانٍ؛ فشلان متتاليان ⇒ منقطع. */
+async function heartbeat() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch("/health", { cache: "no-store", signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.conn.fails = 0;
+    if (state.conn.status === "down" && typeof navigator !== "undefined" && navigator.onLine !== false) {
+      if (state.ws?.readyState !== WebSocket.OPEN) {
+        clearRetryTimers();
+        connect();
+      }
+    }
+    return true;
+  } catch (error) {
+    state.conn.fails += 1;
+    logConn("heartbeat", { reason: navigator.onLine === false ? "network" : "timeout", detail: error?.name || "فشل" });
+    if (state.conn.fails >= 2 && state.conn.status !== "down") {
+      connDown(navigator.onLine === false ? "network" : "timeout", { detail: "فشل نبضة /health" });
+    } else if (state.conn.fails >= 2 && state.conn.status === "down") {
+      renderConnBanner();
+    }
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function startHeartbeat() {
+  if (state.conn.hbTimer) return;
+  state.conn.hbTimer = setInterval(() => void heartbeat(), 15000);
+}
+
+/* --- لوحة الإشعارات --- */
+
+function renderNotifySoundList() {
+  if (!els.notifySoundList) return;
+  const master = SoundBus.volume();
+  els.notifySoundList.innerHTML = SOUND_TYPES.map(
+    (type) => `
+    <div class="c3-sound" data-type="${type.id}">
+      <label class="c3-sound-check">
+        <input type="checkbox" data-type-toggle="${type.id}" ${SoundBus.typeEnabled(type.id) ? "checked" : ""} ${soundEnabled() ? "" : "disabled"} />
+      </label>
+      <div class="c3-sound-text">
+        <strong>${escapeHtml(type.name)}</strong>
+        <span>${escapeHtml(type.desc)}</span>
+      </div>
+      <button class="c3-mini-btn" type="button" data-test-sound="${type.id}" ${master > 0 && soundEnabled() ? "" : "disabled"}>تجربة</button>
+    </div>`,
+  ).join("");
+  if (els.notifyMaster) {
+    els.notifyMaster.checked = soundEnabled();
+  }
+  if (els.notifyVolume) els.notifyVolume.value = String(master);
+  if (els.notifyVolumeLabel) els.notifyVolumeLabel.textContent = `مستوى الصوت: ${master}%`;
+}
+
+function openNotifyPanel() {
+  renderNotifySoundList();
+  renderNotifyPermState();
+  renderConnHistory();
+  const dialog = els.notifyPanel;
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+  } else {
+    dialog.classList.remove("hidden");
+    dialog.setAttribute("open", "");
+  }
+}
+
+function closeNotifyPanel() {
+  const dialog = els.notifyPanel;
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else {
+    dialog.removeAttribute("open");
+    dialog.classList.add("hidden");
+  }
+}
+
+function openConnDiag() {
+  renderConnHistory();
+  const dialog = els.connDiagDialog;
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+  } else {
+    dialog.classList.remove("hidden");
+    dialog.setAttribute("open", "");
+  }
+}
+
+let limitAlertedAt = 0;
+/** تنبيه اقتراب الحد (الاستهلاك/السياق) بحد أقصى مرة كل 5 دقائق. */
+function maybeLimitAlert(percent, label) {
+  if (!Number.isFinite(percent) || percent < 90) return;
+  if (Date.now() - limitAlertedAt < 5 * 60 * 1000) return;
+  limitAlertedAt = Date.now();
+  SoundBus.play("limit");
+  systemNotify("limit", {
+    title: L("🟠 اقتراب الحد", "🟠 Approaching limit"),
+    body: alertBody(`${label} ${Math.round(percent)}%`, state.alert.reply),
+    tag: "pi-limit",
+  });
+}
+
+/** مقتطف آخر رد/خطأ لتضمينه في الإشعار. */
+function noteAlertSnippet(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean) state.alert.reply = clean;
+}
+
+/* --- إدارة عنصر dialog الأصلي --- */
+
+function openExtDialog() {
+  const dialog = els.extUiDialog;
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+  } else {
+    dialog.setAttribute("open", "");
+    dialog.classList.remove("hidden");
+  }
+  const first = els.extUiBody?.querySelector(".ui-option, .ui-field input, .ui-field textarea, .ui-btn");
+  if (first && typeof first.focus === "function") first.focus();
+  renderApprovalQueue();
+}
+
+function closeExtDialog() {
+  const dialog = els.extUiDialog;
+  if (!dialog) return;
+  if (dialog.open && typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+  renderApprovalQueue();
+}
+
+/** إغلاق الواجهة فقط (بلا أي رد) — يبقى الطلب معلّقاً في الشريحة. */
+function dismissExtensionDialog() {
+  if (!state.extUi.current) return;
+  closeExtDialog();
+}
+
+function renderApprovalQueue() {
+  const box = els.approvalQueue;
+  if (!box) return;
+  const request = state.extUi.current;
+  if (!request) {
+    box.innerHTML = "";
+    box.classList.add("hidden");
+    return;
+  }
+  const total = pendingApprovalCount();
+  box.innerHTML = "";
+  box.classList.remove("hidden");
+
+  const text = document.createElement("span");
+  text.className = "aq-text";
+  text.dir = "auto";
+  text.textContent = `⏳ ${L("بانتظار موافقة", "Awaiting approval")}: ${approvalSummary(request)}`;
+  text.title = approvalSummary(request);
+  box.appendChild(text);
+
+  if (total > 1) {
+    const count = document.createElement("span");
+    count.className = "aq-count";
+    count.textContent = `+${total - 1}`;
+    count.title = L(`${total} طلبات معلّقة`, `${total} pending requests`);
+    box.appendChild(count);
+  }
+
+  const visible = !!els.extUiDialog?.open;
+  if (!visible) {
+    if (request.method === "select" || request.method === "confirm") {
+      state.extUi.options.slice(0, 3).forEach((label, index) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `aq-btn${index === 0 ? " primary" : ""}`;
+        btn.textContent = label;
+        btn.dir = "auto";
+        btn.addEventListener("click", () => chooseExtensionOption(index));
+        box.appendChild(btn);
+      });
+    }
+    const show = document.createElement("button");
+    show.type = "button";
+    show.className = "aq-btn";
+    show.textContent = L("عرض", "Show");
+    show.addEventListener("click", openExtDialog);
+    box.appendChild(show);
+  }
+}
+
+/* --- شريط التقدّم وعدّاد المدة --- */
+
+function setTurnProgress(next) {
+  const bar = els.turnProgress;
+  state.turnState = next;
+  if (!bar) return;
+  bar.dataset.state = next;
+  bar.setAttribute("aria-hidden", next === "idle" ? "true" : "false");
+}
+
+function formatClock(totalSeconds) {
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+let turnTimerHandle = null;
+let turnStartedAt = 0;
+
+function startTurnTimer() {
+  if (!els.turnTimer || turnTimerHandle) return;
+  turnStartedAt = Date.now();
+  const tick = () => {
+    els.turnTimer.textContent = formatClock(Math.floor((Date.now() - turnStartedAt) / 1000));
+  };
+  tick();
+  els.turnTimer.classList.remove("hidden");
+  turnTimerHandle = setInterval(tick, 1000);
+}
+
+function stopTurnTimer() {
+  if (turnTimerHandle) {
+    clearInterval(turnTimerHandle);
+    turnTimerHandle = null;
+  }
+  if (els.turnTimer) {
+    els.turnTimer.classList.add("hidden");
+    els.turnTimer.textContent = "00:00";
+  }
+}
+
+function syncSoundButton() {
+  const btn = els.soundBtn;
+  if (!btn) return;
+  const on = soundEnabled();
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.title = on ? L("نغمة التنبيه: مفعّلة", "Alert sound: on") : L("نغمة التنبيه: مكتومة", "Alert sound: muted");
+  btn.setAttribute("aria-label", btn.title);
 }
 
 function handleExtensionUI(request) {
@@ -1092,6 +2583,7 @@ function handleExtensionUI(request) {
     case "editor":
       state.extUi.queue.push(request);
       showNextExtensionDialog();
+      announceApproval(request);
       return;
     case "notify":
       toast(request.message || request.title || "", notifyToastKind(request.notifyType));
@@ -1202,7 +2694,6 @@ function renderExtensionDialog(request) {
   body.innerHTML = "";
   els.extUiTitle.textContent = request.title || request.message || "طلب من إضافة";
   els.extUiDialog.dataset.method = request.method;
-  els.extUiDialog.classList.remove("hidden");
   els.extUiKeysHint.textContent =
     request.method === "editor" ? "Ctrl+Enter للحفظ · Esc للإلغاء" : EXT_UI_KEYBOARD_HINT;
 
@@ -1290,8 +2781,13 @@ function renderExtensionDialog(request) {
   }
 
   startExtensionCountdown(request);
+  openExtDialog();
   if (request.method === "select" || request.method === "confirm") {
-    setTimeout(() => els.extUiDialog?.focus(), 0);
+    setTimeout(() => {
+      const first = els.extUiBody?.querySelector(".ui-option");
+      if (first) first.focus();
+      else els.extUiDialog?.focus();
+    }, 0);
   }
 }
 
@@ -1303,19 +2799,31 @@ function startExtensionCountdown(request) {
   }
   if (els.extUiTimer) els.extUiTimer.textContent = "";
   const timeout = Number(request.timeout);
-  if (!Number.isFinite(timeout) || timeout <= 0) return;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    els.extUiRingWrap?.classList.add("hidden");
+    return;
+  }
+  els.extUiRingWrap?.classList.remove("hidden");
+  const circumference = 2 * Math.PI * 15;
+  const paintRing = (left) => {
+    const ratio = Math.max(0, Math.min(1, left / timeout));
+    if (els.extUiRing) els.extUiRing.style.strokeDashoffset = String(circumference * (1 - ratio));
+    els.extUiRingWrap?.classList.toggle("is-urgent", left > 0 && left <= 5000);
+  };
   ui.deadline = Date.now() + timeout;
   const tick = () => {
     const left = Math.max(0, ui.deadline - Date.now());
-    if (els.extUiTimer) els.extUiTimer.textContent = left > 0 ? `⏳ ${Math.ceil(left / 1000)}s` : "";
+    if (els.extUiTimer) els.extUiTimer.textContent = left > 0 ? String(Math.ceil(left / 1000)) : "";
+    paintRing(left);
     if (left > 0) return;
     // pi نفسه يحلّ الحوار عند المهلة؛ نغلق محلياً وننظّف التتبّع على الخادم فقط.
     const id = ui.current?.id;
     if (id) send({ type: "extension_ui_dismiss", id });
     finishExtensionDialog();
   };
+  paintRing(timeout);
   tick();
-  ui.countdown = setInterval(tick, 500);
+  ui.countdown = setInterval(tick, 250);
 }
 
 function updateActiveExtensionOption() {
@@ -1372,8 +2880,14 @@ function finishExtensionDialog() {
   ui.activeIndex = 0;
   ui.deadline = 0;
   if (els.extUiTimer) els.extUiTimer.textContent = "";
-  els.extUiDialog?.classList.add("hidden");
-  setTimeout(showNextExtensionDialog, 60);
+  els.extUiRingWrap?.classList.add("hidden");
+  closeExtDialog();
+  setTimeout(() => {
+    showNextExtensionDialog();
+    renderApprovalQueue();
+    if (!state.extUi.current) stopTitleFlash();
+    else startTitleFlash();
+  }, 60);
 }
 
 function onExtensionDialogKeydown(event) {
@@ -1427,6 +2941,483 @@ function onExtensionDialogKeydown(event) {
   }
 }
 
+/* ===== B1: تمرير RPC عام (رسالة rpc/rpc_result/rpc_error) ===== */
+
+let rpcSeq = 0;
+const rpcPending = new Map();
+
+/**
+ * يرسل أمر RPC مسموحاً عبر WS وينتظر رده. لا يستخدمه أي مسار قديم،
+ * لذلك تعطّله لا يؤثر على المحادثة العادية.
+ */
+function rpcCall(command, data = {}, { timeoutMs = 60_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      reject(new Error("غير متصل بالخادم"));
+      return;
+    }
+    const id = `ui-rpc-${++rpcSeq}`;
+    const timer = setTimeout(() => {
+      rpcPending.delete(id);
+      reject(new Error(`انتهت مهلة الأمر ${command}`));
+    }, timeoutMs);
+    rpcPending.set(id, { resolve, reject, timer });
+    try {
+      state.ws.send(JSON.stringify({ type: "rpc", id, command, data }));
+    } catch (err) {
+      rpcPending.delete(id);
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+function rejectPendingRpc(message) {
+  for (const [id, pending] of rpcPending) {
+    clearTimeout(pending.timer);
+    rpcPending.delete(id);
+    pending.reject(new Error(message));
+  }
+}
+
+/* ========================================================================
+ * B3: لوحة أوامر /
+ * محلية: /model /thinking /new /compact /stop /approvals
+ * خادمية: get_commands (أوامر إضافات + مهارات /skill:name + قوالب)
+ * ======================================================================== */
+
+const LOCAL_COMMANDS = [
+  { name: "model", description: "تغيير النموذج الحالي (من قائمة النموذج بالأعلى)", source: "local", icon: "🧩" },
+  { name: "thinking", description: "تغيير مستوى التفكير", source: "local", icon: "🧠" },
+  { name: "new", description: "بدء جلسة جديدة في هذا التبويب", source: "local", icon: "✨" },
+  { name: "compact", description: "ضغط السياق — أضف تعليمات بعد الأمر إن أردت", source: "local", icon: "🗜️", insert: true },
+  { name: "stop", description: "إيقاف التوليد الحالي", source: "local", icon: "■" },
+  { name: "approvals", description: "عرض وحذف قواعد موافقة الأدوات المحفوظة", source: "local", icon: "🔐" },
+];
+
+function isLocalCommand(name) {
+  return LOCAL_COMMANDS.some((command) => command.name === name);
+}
+
+function commandGroup(command) {
+  if (command.source === "skill") return "skill";
+  if (command.source === "prompt") return "prompt";
+  return "system";
+}
+
+function commandPool() {
+  const locals = LOCAL_COMMANDS;
+  const localNames = new Set(locals.map((command) => command.name));
+  return [...locals, ...state.commands.items.filter((command) => !localNames.has(command.name))];
+}
+
+function filterCommands(query) {
+  const q = String(query || "").trim().toLowerCase();
+  return commandPool()
+    .filter((command) => {
+      if (!q) return true;
+      const haystack = `${command.name} ${command.description || ""}`.toLowerCase();
+      return haystack.includes(q);
+    })
+    .slice(0, 80);
+}
+
+async function loadCommands(force = false) {
+  const cmds = state.commands;
+  if (cmds.loading) return;
+  if (cmds.loaded && !force) return;
+  cmds.loading = true;
+  cmds.error = null;
+  renderCommandPanel();
+  try {
+    const data = await rpcCall("get_commands", {}, { timeoutMs: 60_000 });
+    const list = Array.isArray(data?.commands) ? data.commands : [];
+    cmds.items = list
+      .map((command) => ({
+        name: String(command?.name || "").trim(),
+        description: String(command?.description || "").trim(),
+        source: command?.source === "skill" ? "skill" : command?.source === "prompt" ? "prompt" : "extension",
+        sourceInfo: command?.sourceInfo || null,
+      }))
+      .filter((command) => command.name);
+    cmds.loaded = true;
+  } catch (err) {
+    cmds.error = err?.message || String(err);
+    cmds.loaded = false;
+  } finally {
+    cmds.loading = false;
+    if (cmds.open) renderCommandPanel();
+  }
+}
+
+function slashToken() {
+  const el = els.input;
+  if (!el) return null;
+  const caret = el.selectionStart ?? el.value.length;
+  const before = el.value.slice(0, caret);
+  const match = /^\/([^\s]*)$/.exec(before);
+  if (!match) return null;
+  return { query: match[1], caret };
+}
+
+function openCommandPanel() {
+  state.commands.open = true;
+  state.commands.query = slashToken()?.query ?? "";
+  state.commands.index = 0;
+  renderCommandPanel();
+  void loadCommands();
+}
+
+function closeCommandPanel() {
+  const cmds = state.commands;
+  cmds.open = false;
+  cmds.filtered = [];
+  cmds.index = 0;
+  if (els.cmdPanel) {
+    els.cmdPanel.classList.add("hidden");
+    els.cmdPanel.replaceChildren();
+  }
+}
+
+function syncCommandPanel() {
+  const token = slashToken();
+  if (!token) {
+    if (state.commands.open) closeCommandPanel();
+    return;
+  }
+  const cmds = state.commands;
+  if (!cmds.open || cmds.query !== token.query) cmds.index = 0;
+  cmds.open = true;
+  cmds.query = token.query;
+  renderCommandPanel();
+  void loadCommands();
+}
+
+function commandRow(command, index) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = `cmd-item${index === state.commands.index ? " active" : ""}`;
+  row.dataset.index = String(index);
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", index === state.commands.index ? "true" : "false");
+
+  const icon = document.createElement("span");
+  icon.className = "cmd-icon";
+  icon.textContent =
+    command.icon ||
+    (command.source === "skill" ? "🧠" : command.source === "prompt" ? "📄" : command.source === "local" ? "⚙️" : "🧱");
+
+  const main = document.createElement("span");
+  main.className = "cmd-main";
+  const name = document.createElement("span");
+  name.className = "cmd-name";
+  name.dir = "ltr";
+  name.textContent = `/${command.name}`;
+  main.appendChild(name);
+  if (command.description) {
+    const description = document.createElement("span");
+    description.className = "cmd-desc";
+    description.dir = "auto";
+    description.textContent = command.description;
+    main.appendChild(description);
+  }
+
+  const hint = document.createElement("span");
+  hint.className = "cmd-hint";
+  hint.textContent = command.source === "local" ? "محلي" : command.source === "skill" ? "مهارة" : command.source === "prompt" ? "قالب" : "إضافة";
+
+  row.append(icon, main, hint);
+  row.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    chooseCommand(index);
+  });
+  return row;
+}
+
+function renderCommandPanel() {
+  const panel = els.cmdPanel;
+  if (!panel) return;
+  const cmds = state.commands;
+  if (!cmds.open) {
+    panel.classList.add("hidden");
+    panel.replaceChildren();
+    return;
+  }
+
+  const filtered = filterCommands(cmds.query);
+  cmds.filtered = filtered;
+  if (cmds.index >= filtered.length) cmds.index = Math.max(0, filtered.length - 1);
+
+  panel.replaceChildren();
+
+  const head = document.createElement("div");
+  head.className = "cmd-head";
+  const title = document.createElement("span");
+  title.textContent = cmds.query ? `أوامر تطابق «${cmds.query}»` : "الأوامر المتاحة";
+  const keys = document.createElement("span");
+  keys.className = "cmd-keys";
+  keys.textContent = "↑↓ تنقّل · Enter اختيار · Esc إغلاق";
+  head.append(title, keys);
+  panel.appendChild(head);
+
+  const groupLabels = [
+    ["system", "⚙️ أوامر النظام"],
+    ["skill", "🧠 مهارات /skill:name"],
+    ["prompt", "📄 قوالب الأوامر"],
+  ];
+
+  let rowIndex = 0;
+  for (const [group, label] of groupLabels) {
+    const items = filtered.filter((command) => commandGroup(command) === group);
+    if (!items.length) continue;
+    const groupHead = document.createElement("div");
+    groupHead.className = "cmd-group";
+    groupHead.textContent = label;
+    panel.appendChild(groupHead);
+    for (const command of items) {
+      panel.appendChild(commandRow(command, rowIndex));
+      rowIndex += 1;
+    }
+  }
+
+  if (!filtered.length && !cmds.loading) {
+    const empty = document.createElement("div");
+    empty.className = "cmd-empty";
+    empty.textContent = cmds.error ? `⚠️ ${cmds.error}` : "لا توجد أوامر مطابقة.";
+    panel.appendChild(empty);
+  }
+  if (cmds.loading) {
+    const loading = document.createElement("div");
+    loading.className = "cmd-empty";
+    loading.textContent = "⏳ جارٍ تحميل أوامر pi (الإضافات والمهارات والقوالب)…";
+    panel.appendChild(loading);
+  } else if (cmds.error && filtered.length) {
+    const error = document.createElement("div");
+    error.className = "cmd-empty";
+    error.textContent = `⚠️ ${cmds.error}`;
+    panel.appendChild(error);
+  }
+
+  panel.classList.remove("hidden");
+  panel.querySelector(".cmd-item.active")?.scrollIntoView?.({ block: "nearest" });
+}
+
+function chooseCommand(index) {
+  const cmds = state.commands;
+  const command = cmds.filtered[index];
+  if (!command) return;
+  const el = els.input;
+  const token = slashToken();
+  const rest = token ? el.value.slice(token.caret) : "";
+
+  // الأوامر التي تقبل وسائط (مثل /compact تعليمات) تبقى في المحرر.
+  if (command.insert) {
+    el.value = `/${command.name} ${rest}`;
+    const caret = command.name.length + 2;
+    el.focus();
+    el.setSelectionRange(caret, caret);
+    autoResize();
+    saveActiveDraft();
+    persistTabs();
+    closeCommandPanel();
+    return;
+  }
+
+  if (command.source === "local") {
+    if (token) {
+      el.value = rest;
+      autoResize();
+    }
+    saveActiveDraft();
+    closeCommandPanel();
+    closePathMenu();
+    runLocalCommand(command.name, "");
+    return;
+  }
+
+  el.value = `/${command.name} ${rest}`;
+  const caret = command.name.length + 2;
+  el.focus();
+  el.setSelectionRange(caret, caret);
+  autoResize();
+  saveActiveDraft();
+  persistTabs();
+  closeCommandPanel();
+}
+
+function handleCommandKey(event) {
+  const cmds = state.commands;
+  if (!cmds.open) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (!cmds.filtered.length) return false;
+    event.preventDefault();
+    const total = cmds.filtered.length;
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    cmds.index = (cmds.index + delta + total) % total;
+    renderCommandPanel();
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    event.preventDefault();
+    if (cmds.filtered.length) chooseCommand(cmds.index);
+    else closeCommandPanel();
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeCommandPanel();
+    return true;
+  }
+  return false;
+}
+
+function runLocalCommand(name, args = "") {
+  switch (name) {
+    case "new":
+      send({ type: "new_session" });
+      break;
+    case "stop":
+      send({ type: "abort" });
+      break;
+    case "compact":
+      if (args.trim()) void compactWithInstructions(args.trim());
+      else send({ type: "compact" });
+      break;
+    case "model":
+      els.modelSelect?.focus();
+      toast("اختر النموذج من قائمة «النموذج» أعلى الصفحة.", "success");
+      break;
+    case "thinking":
+      els.thinkingSelect?.focus();
+      toast("اختر مستوى التفكير من القائمة العلوية.", "success");
+      break;
+    case "approvals":
+      void openApprovals();
+      break;
+    default:
+      break;
+  }
+}
+
+/** /compact مع تعليمات: تُمرَّر عبر RPC الجديد بحقل customInstructions. */
+async function compactWithInstructions(instructions) {
+  addNotice("🗜️ جارٍ ضغط السياق بالتعليمات المخصّصة…");
+  try {
+    const result = await rpcCall("compact", { customInstructions: instructions }, { timeoutMs: 10 * 60_000 });
+    const before = Number(result?.tokensBefore);
+    const after = Number(result?.estimatedTokensAfter);
+    const detail = Number.isFinite(before) && Number.isFinite(after) ? ` (${fmtCompact(before)} ← ${fmtCompact(after)})` : "";
+    addNotice(`✅ تم ضغط السياق${detail}`);
+  } catch (err) {
+    addErrorMessage(err?.message || "تعذّر ضغط السياق");
+  }
+}
+
+/* ===== C2/B3: إدارة قواعد الموافقة المحفوظة ===== */
+
+async function openApprovals() {
+  if (!els.approvalsModal) return;
+  els.approvalsModal.classList.remove("hidden");
+  els.approvalsBody.innerHTML = `<div class="cc-empty">⏳ جارٍ تحميل القواعد…</div>`;
+  await refreshApprovals();
+}
+
+function closeApprovals() {
+  els.approvalsModal?.classList.add("hidden");
+}
+
+async function refreshApprovals() {
+  const body = els.approvalsBody;
+  if (!body) return;
+  try {
+    const data = await apiFetch("/api/approvals");
+    const rules = Array.isArray(data?.rules) ? data.rules : [];
+    body.replaceChildren();
+
+    const note = document.createElement("p");
+    note.className = "approvals-note";
+    note.dir = "auto";
+    note.textContent = rules.length
+      ? "هذه القواعد تُطبَّق تلقائياً في كل جلسة جديدة. حذف القاعدة يعيد السؤال عند الاستخدام التالي."
+      : "لا توجد قواعد محفوظة بعد. ستظهر هنا عند اختيار «سماح دائماً» في حوار الموافقة.";
+    body.appendChild(note);
+
+    if (rules.length) {
+      const list = document.createElement("div");
+      list.className = "approvals-list";
+      for (const rule of rules) {
+        const row = document.createElement("div");
+        row.className = "approvals-row";
+        const info = document.createElement("div");
+        info.className = "approvals-info";
+        const tool = document.createElement("b");
+        tool.dir = "ltr";
+        tool.textContent = rule.tool;
+        const pattern = document.createElement("code");
+        pattern.dir = "ltr";
+        pattern.textContent = rule.pattern === "*" ? "* (كل الأوامر)" : rule.pattern;
+        info.append(tool, pattern);
+        if (rule.createdAt) {
+          const when = document.createElement("small");
+          when.textContent = fmtDate(rule.createdAt);
+          info.appendChild(when);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn";
+        remove.textContent = "حذف";
+        remove.addEventListener("click", async () => {
+          remove.disabled = true;
+          try {
+            await apiFetch("/api/approvals", {
+              method: "DELETE",
+              body: { tool: rule.tool, pattern: rule.pattern },
+            });
+            toast("تم حذف القاعدة.", "success");
+            await refreshApprovals();
+          } catch (err) {
+            remove.disabled = false;
+            toast(err?.message || "تعذّر حذف القاعدة", "error");
+          }
+        });
+        row.append(info, remove);
+        list.appendChild(row);
+      }
+      body.appendChild(list);
+
+      const actions = document.createElement("div");
+      actions.className = "approvals-actions";
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "btn danger";
+      clear.textContent = "🗑️ حذف كل القواعد";
+      clear.addEventListener("click", async () => {
+        if (!window.confirm("حذف كل قواعد الموافقة المحفوظة؟")) return;
+        clear.disabled = true;
+        try {
+          await apiFetch("/api/approvals", { method: "DELETE", body: {} });
+          toast("تم حذف كل القواعد.", "success");
+          await refreshApprovals();
+        } catch (err) {
+          clear.disabled = false;
+          toast(err?.message || "تعذّر حذف القواعد", "error");
+        }
+      });
+      actions.appendChild(clear);
+      body.appendChild(actions);
+    }
+
+    const path = document.createElement("small");
+    path.className = "approvals-path";
+    path.dir = "ltr";
+    path.textContent = data?.path || "";
+    body.appendChild(path);
+  } catch (err) {
+    body.innerHTML = `<div class="cc-empty">⚠️ ${escapeHtml(err?.message || "تعذّر تحميل القواعد")}</div>`;
+  }
+}
+
 /* ===== WebSocket ===== */
 
 function wsUrl() {
@@ -1447,6 +3438,8 @@ function connect() {
   ws.addEventListener("open", () => {
     state.reconnectDelay = 1000;
     setConnected(true);
+    connUp();
+    startHeartbeat();
   });
   ws.addEventListener("message", (evt) => {
     let data;
@@ -1457,17 +3450,17 @@ function connect() {
     }
     handleServerMessage(data);
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (evt) => {
     setConnected(false);
-    // الخادم يلغي حوارات هذا الاتصال عند الانقطاع؛ لا نُبقي نوافذ معلّقة.
+    rejectPendingRpc("انقطع الاتصال بالخادم");
+    closeCommandPanel();
+    // الخادم يلغي حوارات هذا الاتصال عند الانقطاع؛ نحفظ نسخة لعرضها بعد العودة.
     resetExtensionUI();
     if (manualClose) return;
-    const delay = state.reconnectDelay;
-    state.reconnectDelay = Math.min(state.reconnectDelay * 1.6, 15000);
-    setTimeout(async () => {
-      await loadConfig();
-      connect();
-    }, delay);
+    connDown(classifyClose(evt?.code), {
+      code: evt?.code ?? 1006,
+      detail: evt?.reason || `رمز إغلاق ${evt?.code ?? 1006}`,
+    });
   });
   ws.addEventListener("error", () => {
     ws.close();
@@ -1489,10 +3482,30 @@ function submitPrompt() {
   const text = els.input.value.trim();
   const items = [...state.attachments.items];
   if (submitting || (!text && !items.length)) return;
+
+  // B3: أوامر محلية (/new /stop /compact …) تُنفَّذ عبر مساراتها الحالية.
+  if (!items.length && text.startsWith("/")) {
+    const match = /^\/([A-Za-z0-9:_-]+)(?:\s+([\s\S]*))?$/.exec(text);
+    if (match && isLocalCommand(match[1])) {
+      const name = match[1];
+      const args = (match[2] || "").trim();
+      els.input.value = "";
+      saveActiveDraft();
+      autoResize();
+      closeCommandPanel();
+      closePathMenu();
+      runLocalCommand(name, args);
+      return;
+    }
+  }
+
   if (!items.length) {
     if (!send({ type: "prompt", text })) return;
     els.input.value = "";
+    saveActiveDraft();
+    persistTabs();
     closePathMenu();
+    closeCommandPanel();
     autoResize();
     setStreaming(true);
     return;
@@ -1671,7 +3684,10 @@ async function submitWithAttachments(text, items) {
     if (attachments.length) message.attachments = attachments;
     if (!send(message)) return;
     els.input.value = "";
+    saveActiveDraft();
+    persistTabs();
     closePathMenu();
+    closeCommandPanel();
     clearAttachments();
     autoResize();
     setStreaming(true);
@@ -1844,9 +3860,13 @@ function bindUi() {
   els.stopBtn.addEventListener("click", () => send({ type: "abort" }));
   els.input.addEventListener("input", () => {
     autoResize();
-    updatePathCompletion();
+    saveActiveDraft();
+    persistTabs();
+    syncCommandPanel();
+    if (!state.commands.open) updatePathCompletion();
   });
   els.input.addEventListener("keydown", (e) => {
+    if (handleCommandKey(e)) return;
     if (handlePathKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -1854,8 +3874,11 @@ function bindUi() {
     }
   });
   els.input.addEventListener("blur", () => {
-    // إغلاق القائمة بعد فوات حدث النقر (mousedown يمنع فقد التركيز أصلاً).
-    setTimeout(() => closePathMenu(), 120);
+    // إغلاق القوائم بعد فوات حدث النقر (mousedown يمنع فقد التركيز أصلاً).
+    setTimeout(() => {
+      closePathMenu();
+      if (state.commands.open) closeCommandPanel();
+    }, 120);
   });
 
   // B2: الإرفاق (زر + سحب وإفلات + لصق صورة)
@@ -1905,14 +3928,51 @@ function bindUi() {
     els.input?.focus();
   });
   document.addEventListener("mousedown", (event) => {
+    if (state.commands.open && !els.cmdPanel?.contains(event.target) && !els.input?.contains(event.target)) {
+      closeCommandPanel();
+    }
     if (!state.paths.open) return;
     if (els.pathMenu?.contains(event.target) || els.input?.contains(event.target)) return;
     closePathMenu();
   });
 
   els.newSessionBtn.addEventListener("click", () => {
-    send({ type: "new_session" });
+    // B1: «محادثة جديدة» تفتح تبويباً مستقلاً؛ الجلسة المشتركة مع تيليجرام تبقى كما هي.
+    addTab();
     els.sidebar.classList.remove("open");
+  });
+
+  els.newTabBtn?.addEventListener("click", () => addTab());
+
+  els.slashBtn?.addEventListener("click", () => {
+    const el = els.input;
+    if (!el) return;
+    const caret = el.selectionStart ?? el.value.length;
+    if (!el.value.startsWith("/")) {
+      el.value = `/${el.value}`;
+      el.setSelectionRange(caret + 1, caret + 1);
+    }
+    el.focus();
+    autoResize();
+    saveActiveDraft();
+    syncCommandPanel();
+  });
+
+  els.approvalsClose?.addEventListener("click", closeApprovals);
+  els.approvalsModal?.addEventListener("click", (event) => {
+    if (event.target === els.approvalsModal) closeApprovals();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && els.approvalsModal && !els.approvalsModal.classList.contains("hidden")) {
+      closeApprovals();
+      return;
+    }
+    // Alt+T = تبويب جديد (لا يتعارض مع الكتابة داخل المحرر).
+    if (event.altKey && (event.key === "t" || event.key === "T")) {
+      event.preventDefault();
+      addTab();
+    }
   });
 
   els.modelSelect.addEventListener("change", () => {
@@ -1936,8 +3996,150 @@ function bindUi() {
   // C1: حوار الامتدادات — Esc/Enter/الأرقام + زر الإغلاق.
   els.extUiDialog?.addEventListener("keydown", onExtensionDialogKeydown);
   els.extUiClose?.addEventListener("click", () => cancelExtensionDialog());
+  els.extUiLater?.addEventListener("click", dismissExtensionDialog);
+  // Esc الأصلي: نمنع الإغلاق التلقائي ونمرّره إلى مسار الإلغاء الموحّد.
+  els.extUiDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    cancelExtensionDialog();
+  });
+  // النقر على ::backdrop يغلق الواجهة فقط ويُبقي الطلب معلّقاً في الشريحة.
   els.extUiDialog?.addEventListener("click", (event) => {
-    if (event.target === els.extUiDialog) cancelExtensionDialog();
+    if (event.target === els.extUiDialog) dismissExtensionDialog();
+  });
+
+  if (els.soundBtn) {
+    syncSoundButton();
+    els.soundBtn.addEventListener("click", () => {
+      setSoundEnabled(!soundEnabled());
+      syncSoundButton();
+      if (els.notifyMaster) els.notifyMaster.checked = soundEnabled();
+      renderNotifySoundList();
+      if (soundEnabled()) SoundBus.play("message");
+    });
+  }
+
+  /* --- C3: لوحة الإشعارات + شريط الانقطاع + مراقبة الاتصال --- */
+  els.notifyBtn?.addEventListener("click", openNotifyPanel);
+  els.notifyPanelClose?.addEventListener("click", closeNotifyPanel);
+  els.notifyPanel?.addEventListener("click", (event) => {
+    if (event.target === els.notifyPanel) closeNotifyPanel();
+  });
+  els.notifyMaster?.addEventListener("change", () => {
+    setSoundEnabled(!!els.notifyMaster.checked);
+    syncSoundButton();
+    renderNotifySoundList();
+  });
+  els.notifyVolume?.addEventListener("input", () => {
+    const value = SoundBus.setVolume(els.notifyVolume.value);
+    if (els.notifyVolumeLabel) els.notifyVolumeLabel.textContent = `مستوى الصوت: ${value}%`;
+  });
+  els.notifySoundList?.addEventListener("click", (event) => {
+    const testBtn = event.target.closest("[data-test-sound]");
+    if (!testBtn) return;
+    SoundBus.play(testBtn.dataset.testSound);
+  });
+  els.notifySoundList?.addEventListener("change", (event) => {
+    const toggle = event.target.closest("[data-type-toggle]");
+    if (!toggle) return;
+    SoundBus.setTypeEnabled(toggle.dataset.typeToggle, !!toggle.checked);
+  });
+  els.notifyConnClear?.addEventListener("click", () => {
+    state.conn.history = [];
+    renderConnHistory();
+    toast(L("مُسح سجل الاتصال", "Connection log cleared"));
+  });
+
+  els.notifyExplainAllow?.addEventListener("click", async () => {
+    els.notifyExplain?.close?.();
+    await requestNotifyPermission();
+    renderNotifyPermState();
+  });
+  els.notifyExplainLater?.addEventListener("click", () => {
+    try {
+      localStorage.setItem(NOTIFY_EXPLAINED_KEY, "1");
+    } catch {
+      /* تجاهل */
+    }
+    els.notifyExplain?.close?.();
+  });
+  els.notifyExplain?.addEventListener("cancel", () => {
+    try {
+      localStorage.setItem(NOTIFY_EXPLAINED_KEY, "1");
+    } catch {
+      /* تجاهل */
+    }
+  });
+  els.notifyBarRetry?.addEventListener("click", () => {
+    const dialog = els.notifyExplain;
+    if (notifyPermission() === "default" && dialog && typeof dialog.showModal === "function") dialog.showModal();
+    else void requestNotifyPermission();
+  });
+  els.notifyBarClose?.addEventListener("click", () => els.notifyBar?.classList.add("hidden"));
+
+  els.connBannerRetry?.addEventListener("click", () => {
+    clearRetryTimers();
+    state.conn.attempt = 0;
+    logConn("retry", { detail: "يدوي" });
+    try {
+      state.ws?.close();
+    } catch {
+      /* تجاهل */
+    }
+    connect();
+    void heartbeat();
+  });
+  els.connBannerDiag?.addEventListener("click", openConnDiag);
+  els.connDiagClose?.addEventListener("click", () => els.connDiagDialog?.close?.());
+  els.connDiagDialog?.addEventListener("click", (event) => {
+    if (event.target === els.connDiagDialog) els.connDiagDialog.close?.();
+  });
+
+  window.addEventListener("offline", () => {
+    logConn("offline", { reason: "network" });
+    if (state.conn.status !== "down") connDown("network", { detail: "navigator.onLine=false" });
+    else {
+      state.conn.reason = "network";
+      renderConnBanner();
+    }
+  });
+  window.addEventListener("online", () => {
+    logConn("online");
+    if (state.conn.status === "down") {
+      state.conn.fails = 0;
+      clearRetryTimers();
+      state.conn.attempt = 0;
+      try {
+        state.ws?.close();
+      } catch {
+        /* تجاهل */
+      }
+      connect();
+    }
+    void heartbeat();
+  });
+
+  syncNotifyBar();
+  renderConnHistory();
+  startHeartbeat();
+
+  // تنبيه ثابت عند العودة بعد غياب طويل وطلب معلّق.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      state.extUi.hiddenAt = Date.now();
+      return;
+    }
+    const hiddenFor = state.extUi.hiddenAt ? Date.now() - state.extUi.hiddenAt : 0;
+    state.extUi.hiddenAt = 0;
+    const request = state.extUi.current;
+    if (request && hiddenFor > 45_000 && (request.method === "select" || request.method === "confirm")) {
+      stickyToast(
+        L(
+          `⏳ لا يزال هناك طلب بانتظار موافقتك (${Math.round(hiddenFor / 1000)}ث) — ${approvalSummary(request)}`,
+          `⏳ A request is still awaiting your approval (${Math.round(hiddenFor / 1000)}s) — ${approvalSummary(request)}`,
+        ),
+      );
+    }
+    renderApprovalQueue();
   });
 
   els.compactBtn.addEventListener("click", () => send({ type: "compact" }));
@@ -3143,10 +5345,30 @@ async function onControlSubmit(event) {
   }
 }
 
+/* خطّاف اختبار (بيئة الاختبار فقط — يُفعّل بـ?soundtest=1) */
+try {
+  if (new URLSearchParams(location.search).has("soundtest")) {
+    window.__soundBus = SoundBus;
+    window.__conn = state.conn;
+    window.__soundTypes = SOUND_TYPES.map((type) => type.id);
+    window.__test = {
+      event: (payload) => handleConversationEvent(payload),
+      approve: (request) => announceApproval(request),
+      classify: (code) => classifyClose(code),
+      connDown: (reason, opts) => connDown(reason, opts),
+      conn: state.conn,
+      sound: SoundBus,
+    };
+  }
+} catch {
+  /* تجاهل */
+}
+
 async function main() {
   initTheme();
   bindUi();
   await loadConfig();
+  initTabs();
   connect();
 }
 

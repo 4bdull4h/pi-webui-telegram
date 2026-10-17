@@ -41,13 +41,20 @@ const MARKER = "approvals-ok";
 const PROMPT = `استخدم أداة bash لتشغيل هذا الأمر حرفياً ثم أجب بمخرجته فقط، دون أي خطوة أخرى:\necho ${MARKER}`;
 const RETRY_PROMPT = `شغّل الأمر التالي الآن باستخدام أداة bash فقط:\necho ${MARKER}`;
 
-const OPTIONS = ["✅ سماح", "⛔️ رفض", "♾️ سماح دائماً"];
+const OPTIONS = [
+  "✅ سماح",
+  "⛔️ رفض",
+  "🔁 سماح دائماً لهذا الأمر",
+  "♾️ سماح دائماً لهذه الأداة",
+];
 const SCENARIO = (() => {
   const raw = process.argv.find((arg) => arg.startsWith("--scenario="))?.split("=")[1] || "allow";
-  return raw === "always" ? "always" : "allow";
+  if (raw === "always" || raw === "always-tool") return raw;
+  return "allow";
 })();
-/** الاختيار الذي يرسله الاختبار: سماح مرة واحدة (افتراضي) أو سماح دائماً. */
-const RESPONSE = SCENARIO === "always" ? OPTIONS[2] : OPTIONS[0];
+/** الاختيار الذي يرسله الاختبار: سماح مرة واحدة، قاعدة أمر، أو قاعدة أداة. */
+const RESPONSE =
+  SCENARIO === "always" ? OPTIONS[2] : SCENARIO === "always-tool" ? OPTIONS[3] : OPTIONS[0];
 
 const verbose = process.argv.includes("--verbose");
 const log = (...args) => console.log("[test-approvals]", ...args);
@@ -334,7 +341,7 @@ async function main() {
     if (JSON.stringify(dialog.options) !== JSON.stringify(OPTIONS)) {
       fail(`خيارات الحوار غير متوقعة: ${JSON.stringify(dialog.options)}`);
     }
-    log("✔ الخيارات الثلاثة وصلت بالترتيب المتوقع.");
+    log("✔ الخيارات الأربعة وصلت بالترتيب المتوقع.");
 
     if (!/bash/i.test(dialog.title || "") || !dialog.title.includes(MARKER)) {
       fail(`عنوان الحوار لا يشرح الأمر/الأداة: ${JSON.stringify(dialog.title)}`);
@@ -374,6 +381,10 @@ async function main() {
       const saved = rules.find((rule) => rule.tool === "bash" && rule.pattern === "echo");
       if (!saved) fail(`لم تُحفظ قاعدة السماح الدائم: ${JSON.stringify(rules)}`);
       log("✔ حُفظت قاعدة {tool: bash, pattern: echo} في ملف القواعد.");
+    } else if (SCENARIO === "always-tool") {
+      const saved = rules.find((rule) => rule.tool === "bash" && rule.pattern === "*");
+      if (!saved) fail(`لم تُحفظ قاعدة السماح الدائم للأداة: ${JSON.stringify(rules)}`);
+      log("✔ حُفظت قاعدة {tool: bash, pattern: '*'} في ملف القواعد.");
     } else {
       if (rules.length > 0) fail(`السماح مرة واحدة كتب قواعد: ${JSON.stringify(rules)}`);
       log("✔ لم تُحفظ أي قاعدة (سماح مرة واحدة فقط).");

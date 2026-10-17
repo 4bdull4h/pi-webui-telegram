@@ -12,7 +12,8 @@
  * قيود الأمان والموثوقية:
  * - الوكيل الحالي يجب أن يملك صلاحية `delegate`.
  * - عمق التفويض محدود (PI_DELEGATE_DEPTH ≤ 2).
- * - مهلة افتراضية 10 دقائق (DELEGATE_TIMEOUT_MS).
+ * - مهلة افتراضية 5 دقائق (DELEGATE_TIMEOUT_MS)، ويمكن تعطيل الأداة (DELEGATE_ENABLED=0).
+ * - تحديثات تقدّم دورية كل 15 ثانية حتى يرى المستخدم أن الوكيل يعمل.
  * - قصّ النتيجة إلى 12000 حرف.
  * - لا تُستخدم ctx.ui.custom إطلاقاً، فتعمل الإضافة في TUI وRPC وprint.
  */
@@ -29,8 +30,8 @@ import { Type } from "typebox";
  * الثوابت
  * ========================================================================= */
 
-/** مهلة التنفيذ الافتراضية: 10 دقائق. */
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+/** مهلة التنفيذ الافتراضية: 5 دقائق. */
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 /** الحد الأقصى لعمق التفويض المتداخل. */
 const MAX_DEPTH = 2;
 /** الحد الأقصى لطول النص المُعاد إلى النموذج. */
@@ -77,6 +78,12 @@ function depth(): number {
   const raw = Number(process.env.PI_DELEGATE_DEPTH);
   if (!Number.isFinite(raw) || raw <= 0) return 0;
   return Math.floor(raw);
+}
+
+/** هل أداة التفويض مفعّلة؟ (DELEGATE_ENABLED=0 يعطّلها تماماً). */
+function delegateEnabled(): boolean {
+  const raw = String(process.env.DELEGATE_ENABLED ?? "1").trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
 }
 
 /** مسارات محتملة لملف الوكلاء، بالترتيب. */
@@ -285,13 +292,18 @@ const delegateTool = defineTool({
   }),
   executionMode: "sequential",
 
-  async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+  async execute(_toolCallId, params, signal, onUpdate, ctx) {
     const startedAt = Date.now();
     const fail = (message: string, details: Record<string, unknown> = {}) => ({
       content: [{ type: "text" as const, text: message }],
       details: { ...details, ok: false, durationMs: Date.now() - startedAt },
       isError: true,
     });
+
+    /* --- 0) هل التفويض مفعّل؟ --- */
+    if (!delegateEnabled()) {
+      return fail("التفويض معطّل حالياً (DELEGATE_ENABLED=0). نفّذ المهمة مباشرةً بدل تفويضها.");
+    }
 
     /* --- 1) عمق التفويض --- */
     const currentDepth = depth();
@@ -383,6 +395,26 @@ const delegateTool = defineTool({
       ...(currentAgent ? { PI_AGENT_ID: currentAgent.id } : {}),
     };
 
+    // تحديثات تقدّم دورية حتى يرى المستخدم أن الوكيل ما زال يعمل.
+    let progressTimer: ReturnType<typeof setInterval> | null = null;
+    if (typeof onUpdate === "function") {
+      const label = target.name || target.id;
+      progressTimer = setInterval(() => {
+        const elapsed = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+        const mm = Math.floor(elapsed / 60);
+        const ss = String(elapsed % 60).padStart(2, "0");
+        try {
+          onUpdate({
+            content: [{ type: "text" as const, text: `⏳ الوكيل ${label} يعمل… (${mm}:${ss})` }],
+            details: { agent: target.id, elapsedMs: Date.now() - startedAt },
+          });
+        } catch {
+          /* تجاهل فشل التحديث */
+        }
+      }, 15_000);
+      progressTimer.unref?.();
+    }
+
     let outcome: SpawnOutcome;
     try {
       outcome = await runChild(nodeBin, args, {
@@ -396,6 +428,8 @@ const delegateTool = defineTool({
         `فشل تشغيل الوكيل ${target.name || target.id}: ${err instanceof Error ? err.message : String(err)}`,
         { agent: target.id },
       );
+    } finally {
+      if (progressTimer) clearInterval(progressTimer);
     }
 
     const stderrTail = outcome.stderr.trim().slice(-2000);
@@ -447,5 +481,6 @@ const delegateTool = defineTool({
 });
 
 export default function delegateExtension(pi: ExtensionAPI): void {
+  if (!delegateEnabled()) return;
   pi.registerTool(delegateTool);
 }

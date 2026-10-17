@@ -144,6 +144,8 @@ export class TelegramBot {
     this.pendingUI = new Map();
     // chatId → نفس الكائن أعلاه (لحوارات input/editor التي تنتظر رسالة نصية).
     this.pendingInput = new Map();
+    // ختم آخر تنبيه «لا محادثة مرتبطة» (تنبيه واحد كل 60 ثانية).
+    this.noTargetWarnAt = 0;
   }
 
   get enabled() {
@@ -753,6 +755,21 @@ export class TelegramBot {
     return entry;
   }
 
+  /** تنبيه مشروط: حوار بلا هدف تيليجرام تُرك لقناة أخرى (مرة كل 60 ثانية). */
+  #logNoTargetOnce() {
+    const now = Date.now();
+    if (now - this.noTargetWarnAt < 60_000) return;
+    this.noTargetWarnAt = now;
+    logger.info("تيليجرام: لا محادثة مرتبطة — تُرك الحوار لقناة أخرى");
+  }
+
+  /** سجل تشخيصي لقرار الحوار — مرة واحدة فقط لكل حوار. */
+  #logDecision(entry, decision) {
+    if (!entry || entry.decisionLogged) return;
+    entry.decisionLogged = true;
+    logger.info("تيليجرام: قرار حوار", { requestId: entry.requestId, decision });
+  }
+
   /** إزالة حوار معلّق من الخرائط وإيقاف مؤقته. */
   #clearPending(entry) {
     if (!entry) return;
@@ -767,6 +784,7 @@ export class TelegramBot {
   cancelPendingDialogs() {
     const entries = [...this.pendingUI.values()];
     for (const entry of entries) {
+      this.#logDecision(entry, "cancelled");
       this.#clearPending(entry);
       if (!entry.requestId) continue;
       try {
@@ -793,6 +811,7 @@ export class TelegramBot {
 
   async #expireDialog(entry) {
     if (this.pendingUI.get(entry.requestId) !== entry) return;
+    this.#logDecision(entry, "timeout");
     this.#clearPending(entry);
     if (!entry.chatId || !entry.messageId) return;
     const text = truncateHtml(
@@ -819,6 +838,7 @@ export class TelegramBot {
       return true;
     } catch (err) {
       logger.warn("تيليجرام: تعذّر إرسال حوار الامتداد:", err?.message || err);
+      this.#logDecision(entry, "send-failed");
       this.#clearPending(entry);
       try {
         await Promise.resolve(
@@ -918,8 +938,14 @@ export class TelegramBot {
     // setStatus / setWidget / setTitle / set_editor_text: تُتجاهل بصمت.
     if (!["select", "confirm", "input", "editor"].includes(event.method)) return;
 
-    // لا محادثة/لا هدف: ألغِ الطلب فوراً كي لا تتوقف الأداة 120 ثانية.
-    if (!chatId || !conv) {
+    // لا هدف تيليجرام (تشغيل من المتصفح فقط): لا نُلغِ الطلب — نتركه لقناة أخرى.
+    if (!chatId) {
+      this.#logNoTargetOnce();
+      return;
+    }
+
+    // هدف موجود لكن لا محادثة: ألغِ الطلب كي لا تتوقف الأداة 120 ثانية.
+    if (!conv) {
       try {
         await Promise.resolve(conv?.respondExtensionUI?.(event.requestId, { cancelled: true }));
       } catch {
@@ -952,6 +978,7 @@ export class TelegramBot {
     } catch (err) {
       logger.warn("تيليجرام: تعذّر إرسال رد الحوار:", err?.message || err);
     }
+    this.#logDecision(entry, "input");
     if (entry.messageId && entry.chatId) {
       const suffix = text.length > 200 ? `${text.slice(0, 197)}…` : text;
       const body = truncateHtml(
@@ -994,6 +1021,10 @@ export class TelegramBot {
         decision = escapeHtml(choice);
       }
       this.#clearPending(entry);
+      this.#logDecision(
+        entry,
+        entry.method === "confirm" ? (payload.confirmed ? "allowed" : "rejected") : "selected",
+      );
       await conv.respondExtensionUI(requestId, payload);
       const targetChat = chatId ?? entry.chatId;
       if (messageId && targetChat != null) {
