@@ -837,6 +837,68 @@ function createToolCard(container, { id, name, hint }) {
   return card;
 }
 
+/* ===== B6: عرض diff لتعديلات edit/write ===== */
+
+function splitLines(v) {
+  return String(v ?? "").replace(/\r\n/g, "\n").split("\n");
+}
+
+/** يبني فرقاً مبسطاً بين نصّين: أسطر محذوفة (-) وأسطر مضافة (+). */
+function simpleDiff(oldText, newText) {
+  const a = splitLines(oldText);
+  const b = splitLines(newText);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  let endA = a.length - 1;
+  let endB = b.length - 1;
+  while (endA >= start && endB >= start && a[endA] === b[endB]) { endA -= 1; endB -= 1; }
+  const rows = [];
+  const ctx = (line) => rows.push({ kind: "ctx", text: line });
+  for (let i = Math.max(0, start - 2); i < start; i += 1) ctx(a[i]);
+  for (let i = start; i <= endA; i += 1) rows.push({ kind: "del", text: a[i] });
+  for (let i = start; i <= endB; i += 1) rows.push({ kind: "add", text: b[i] });
+  for (let i = endA + 1; i < Math.min(a.length, endA + 3); i += 1) ctx(a[i]);
+  return rows;
+}
+
+function renderToolDiff(card, name, args, isError) {
+  if (!card || isError || !args) return;
+  if (name !== "edit" && name !== "write") return;
+  const path = args.path || args.file_path || args.filePath || "";
+  const oldText = args.oldText ?? args.old_string ?? args.oldStr ?? "";
+  const newText = args.newText ?? args.new_string ?? args.newStr ?? args.content ?? "";
+  if (name === "write") {
+    const lines = splitLines(newText);
+    const shown = lines.slice(0, 40);
+    card.insertAdjacentHTML(
+      "beforeend",
+      `<div class="tool-diff"><div class="td-head">📄 ${escapeHtml(path)} · ${lines.length} سطر (ملف جديد/مستبدل)</div>` +
+        `<pre class="td-body">${shown
+          .map((l) => `<span class="td-add">+ ${escapeHtml(l)}</span>`)
+          .join("\n")}${lines.length > shown.length ? `\n<span class="td-more">… (+${lines.length - shown.length} سطر)</span>` : ""}</pre></div>`,
+    );
+    return;
+  }
+  const rows = simpleDiff(oldText, newText);
+  if (!rows.some((r) => r.kind !== "ctx")) return;
+  const shown = rows.slice(0, 80);
+  const add = rows.filter((r) => r.kind === "add").length;
+  const del = rows.filter((r) => r.kind === "del").length;
+  card.insertAdjacentHTML(
+    "beforeend",
+    `<details class="tool-diff" open><summary class="td-head">🔀 ${escapeHtml(path)} · <span class="td-plus">+${add}</span> <span class="td-minus">−${del}</span></summary>` +
+      `<pre class="td-body">${shown
+        .map((r) =>
+          r.kind === "add"
+            ? `<span class="td-add">+ ${escapeHtml(r.text)}</span>`
+            : r.kind === "del"
+              ? `<span class="td-del">- ${escapeHtml(r.text)}</span>`
+              : `<span class="td-ctx">  ${escapeHtml(r.text)}</span>`,
+        )
+        .join("\n")}${rows.length > shown.length ? `\n<span class="td-more">… (+${rows.length - shown.length} سطر)</span>` : ""}</pre></details>`,
+  );
+}
+
 function updateToolCard(card, { output, isError }) {
   if (!card) return;
   card.classList.remove("running");
@@ -1448,7 +1510,162 @@ function showStatus() {
     .map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><code>${escapeHtml(v)}</code></div>`)
     .join("");
   els.statusModal.classList.remove("hidden");
+  void augmentStatusWithStats();
 }
+
+/* ===== B8: أمر شل مباشر (!bash) + إحصائيات + بحث ===== */
+
+function appendSystemBlock(title, body, kind = "bash") {
+  const wrap = document.createElement("div");
+  wrap.className = `sys-block ${kind}`;
+  wrap.innerHTML =
+    `<div class="sb-head"><span>${escapeHtml(title)}</span><button type="button" class="sb-copy" title="نسخ">📋</button></div>` +
+    `<pre class="sb-body" dir="ltr"></pre>`;
+  wrap.querySelector(".sb-body").textContent = body || "";
+  wrap.querySelector(".sb-copy").onclick = () => {
+    navigator.clipboard?.writeText(body || "").then(
+      () => toast("📋 نُسخ إلى الحافظة."),
+      () => undefined,
+    );
+  };
+  els.messages.appendChild(wrap);
+  scrollToBottom();
+  return wrap.querySelector(".sb-body");
+}
+
+async function runDirectBash(command) {
+  if (!command) return;
+  const pre = appendSystemBlock(`❯ ${command}`, "…", "bash");
+  const startedAt = Date.now();
+  const onDelta = (event) => {
+    if (event.type === "bash_delta") pre.textContent += event.delta || "";
+  };
+  state.bashSink = onDelta;
+  try {
+    const data = await rpcCall("bash", { command }, { timeoutMs: 300000 });
+    const text = data?.output ?? data?.stdout ?? data?.text ?? "";
+    if (text) pre.textContent = text;
+    if (data?.exitCode != null && Number(data.exitCode) !== 0) {
+      pre.parentElement.classList.add("error");
+      pre.textContent += `\n[exit ${data.exitCode}]`;
+    }
+    SoundBus.play(Number(data?.exitCode ?? 0) === 0 ? "message" : "toolFail");
+  } catch (err) {
+    pre.parentElement.classList.add("error");
+    pre.textContent = `❌ ${err?.message || String(err)}`;
+    SoundBus.play("error");
+  } finally {
+    state.bashSink = null;
+    pre.parentElement.dataset.ms = String(Date.now() - startedAt);
+    scrollToBottom();
+  }
+}
+
+async function augmentStatusWithStats() {
+  const body = document.querySelector("#statusBody") || els.statusBody;
+  if (!body) return;
+  try {
+    const data = await rpcCall("get_session_stats", {}, { timeoutMs: 20000 });
+    const stats = data?.stats || data || {};
+    const rows = [
+      ["📥 توكنز الدخل", stats.inputTokens ?? stats.tokens?.input],
+      ["📤 توكنز الخرج", stats.outputTokens ?? stats.tokens?.output],
+      ["🗃️ ذاكرة الكاش", stats.cacheReadTokens ?? stats.tokens?.cacheRead],
+      ["🧮 الإجمالي", stats.totalTokens ?? stats.tokens?.total],
+      ["💲 التكلفة", stats.cost != null ? `$${Number(stats.cost).toFixed(4)}` : undefined],
+    ].filter(([, v]) => v != null && v !== "");
+    if (!rows.length) return;
+    body.insertAdjacentHTML(
+      "beforeend",
+      `<div class="status-stats"><div class="ss-title">📈 إحصاءات الجلسة</div>${rows
+        .map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><code>${escapeHtml(String(v))}</code></div>`)
+        .join("")}</div>`,
+    );
+  } catch {
+    /* تجاهل: الإحصاءات إثراء لا أساس */
+  }
+}
+
+function openTranscriptSearch() {
+  let box = document.getElementById("findBox");
+  if (box) {
+    box.classList.remove("hidden");
+    box.querySelector("input")?.focus();
+    return;
+  }
+  box = document.createElement("div");
+  box.id = "findBox";
+  box.className = "find-box";
+  box.innerHTML =
+    `<input type="search" placeholder="ابحث في المحادثة…" aria-label="بحث في المحادثة" />` +
+    `<span class="fb-count">0/0</span>` +
+    `<button type="button" data-fb="prev" title="السابق">↑</button>` +
+    `<button type="button" data-fb="next" title="التالي">↓</button>` +
+    `<button type="button" data-fb="close" title="إغلاق">✕</button>`;
+  document.querySelector(".main")?.appendChild(box);
+  const input = box.querySelector("input");
+  let hits = [];
+  let idx = -1;
+  const paint = () => {
+    box.querySelector(".fb-count").textContent = hits.length ? `${idx + 1}/${hits.length}` : "0/0";
+    hits.forEach((h, i) => h.classList.toggle("find-hit", i === idx));
+    hits[idx]?.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  const search = () => {
+    const q = input.value.trim();
+    hits.forEach((h) => h.classList.remove("find-hit"));
+    hits = [];
+    idx = -1;
+    if (!q) return paint();
+    const nodes = [...els.messages.querySelectorAll(".bubble, .md, .sb-body")];
+    for (const n of nodes) {
+      if (n.dataset.hasHit === "1") {
+        n.innerHTML = n.dataset.origHtml || n.innerHTML;
+        delete n.dataset.hasHit;
+      }
+      if (!q || !n.textContent.includes(q)) continue;
+      n.dataset.origHtml = n.innerHTML;
+      n.innerHTML = n.innerHTML.replaceAll(
+        escapeHtml(q),
+        `<mark class="find-mark">${escapeHtml(q)}</mark>`,
+      );
+      n.dataset.hasHit = "1";
+      hits.push(n);
+    }
+    idx = hits.length ? 0 : -1;
+    paint();
+  };
+  let t;
+  input.addEventListener("input", () => {
+    clearTimeout(t);
+    t = setTimeout(search, 180);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") box.remove();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (!hits.length) return;
+      idx = (idx + (e.shiftKey ? -1 : 1) + hits.length) % hits.length;
+      paint();
+    }
+  });
+  box.onclick = (e) => {
+    const b = e.target.closest("[data-fb]");
+    if (!b) return;
+    if (b.dataset.fb === "close") return box.remove();
+    if (!hits.length) return;
+    idx = (idx + (b.dataset.fb === "prev" ? -1 : 1) + hits.length) % hits.length;
+    paint();
+  };
+  input.focus();
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    openTranscriptSearch();
+  }
+});
 
 /* ===== B7: طابور الرسائل (steer / followUp) ===== */
 
@@ -1519,6 +1736,9 @@ function handleConversationEvent(event) {
     case "queue":
       renderQueueBar(event);
       break;
+    case "bash_delta":
+      state.bashSink?.(event);
+      break;
     case "user_message":
       addUserMessage(event.text, event.source || "web");
       setStreaming(true);
@@ -1544,7 +1764,11 @@ function handleConversationEvent(event) {
     case "tool_start": {
       if (!state.currentTurn) state.currentTurn = beginAssistantTurn();
       const card = state.currentTurn.addTool({ id: event.id, name: event.name, hint: hintFor(event.name, event.args) });
-      if (card) state.toolCards.set(event.id, card);
+      if (card) {
+        state.toolCards.set(event.id, card);
+        if (!state.toolArgs) state.toolArgs = new Map();
+        state.toolArgs.set(event.id, event.args || null);
+      }
       setTurnProgress("tool");
       scrollToBottom();
       break;
@@ -1558,6 +1782,12 @@ function handleConversationEvent(event) {
     case "tool_end": {
       const card = state.toolCards.get(event.id);
       updateToolCard(card, { output: event.output, isError: event.isError });
+      // B6: عرض الفرق لتعديلات edit/write داخل بطاقة الأداة.
+      try {
+        renderToolDiff(card, event.name, state.toolArgs?.get(event.id), event.isError);
+      } catch {
+        /* تجاهل: لا نُفشل الواجهة بسبب عرض الفرق */
+      }
       if (event.isError) {
         noteAlertSnippet(event.output);
         SoundBus.play("toolFail");
@@ -4219,6 +4449,16 @@ function submitPrompt() {
       runLocalCommand(name, args);
       return;
     }
+  }
+
+  // B8: تنفيذ أمر شل مباشر بلا نموذج عند بدء النص بـ"!".
+  if (!items.length && text.startsWith("!") && text.length > 1) {
+    els.input.value = "";
+    saveActiveDraft();
+    persistTabs();
+    autoResize();
+    runDirectBash(text.slice(1).trim());
+    return;
   }
 
   if (!items.length) {

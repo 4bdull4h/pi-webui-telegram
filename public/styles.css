@@ -4555,3 +4555,34 @@ html[data-theme="light"] .tree-dialog::backdrop {
   opacity: 0.9;
 }
 @media (prefers-reduced-motion: reduce) { .queue-bar * { transition: none !important; } }
+
+/* ===== B6: عرض الفرق (diff) ===== */
+.tool-diff { margin: 8px 0 2px; border: 1px solid var(--border, #2a3350); border-radius: 10px; overflow: hidden; }
+.td-head { padding: 6px 10px; font-size: 12px; background: rgba(127,127,127,0.10); cursor: pointer; }
+.td-body { margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto; font-size: 12px; line-height: 1.55; direction: ltr; text-align: left; white-space: pre; }
+.td-add { color: #35c07a; }
+.td-del { color: #e2564a; }
+.td-ctx { opacity: 0.65; }
+.td-plus { color: #35c07a; font-weight: 600; }
+.td-minus { color: #e2564a; font-weight: 600; }
+.td-more { opacity: 0.6; }
+
+/* ===== B8: أمر شل مباشر + بحث + إحصاءات ===== */
+.sys-block { margin: 10px 0; border: 1px solid var(--border, #2a3350); border-radius: 12px; overflow: hidden; }
+.sys-block.error { border-color: #e2564a; }
+.sb-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 12.5px; background: rgba(127,127,127,0.10); }
+.sb-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-copy { margin-inline-start: auto; border: 0; background: transparent; cursor: pointer; opacity: .65; }
+.sb-copy:hover { opacity: 1; }
+.sb-body { margin: 0; padding: 10px; max-height: 340px; overflow: auto; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.status-stats { margin-top: 12px; border-top: 1px solid var(--border, #2a3350); padding-top: 8px; }
+.ss-title { font-weight: 600; margin-bottom: 6px; }
+.find-box { position: sticky; top: 8px; z-index: 30; display: flex; align-items: center; gap: 6px; margin: 8px 12px; padding: 6px 10px;
+  border: 1px solid var(--border, #2a3350); border-radius: 999px; background: var(--surface, #11162a); box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+.find-box.hidden { display: none; }
+.find-box input { flex: 1; background: transparent; border: 0; color: inherit; font: inherit; outline: none; }
+.find-box button { border: 0; background: transparent; color: inherit; cursor: pointer; opacity: .7; font-size: 14px; padding: 0 4px; }
+.find-box button:hover { opacity: 1; }
+.fb-count { font-size: 11.5px; opacity: .65; min-width: 34px; text-align: center; }
+.find-mark { background: #f5c451; color: #1a1a1a; border-radius: 3px; }
+.find-hit { outline: 2px solid #f5c451; outline-offset: 3px; border-radius: 8px; }
