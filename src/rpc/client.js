@@ -167,11 +167,14 @@ export class RpcClient extends EventEmitter {
     if (this.noExtensions) args.push("--no-extensions");
     if (this.noSkills) args.push("--no-skills");
     // إضافات المشروع تُحمَّل صراحةً (تبقى فعّالة حتى مع --no-extensions).
+    // ملاحظة: `-e` يقبل ملفات لا مجلدات، لذا نعدّد الملفات ونمرّر كل واحد.
     if (existsSync(PROJECT_EXTENSIONS_DIR)) {
-      const hasExtension = readdirSync(PROJECT_EXTENSIONS_DIR).some((f) =>
-        /\.(ts|js|mjs|tsx)$/.test(f),
-      );
-      if (hasExtension) args.push("--extension", PROJECT_EXTENSIONS_DIR);
+      const extensionFiles = readdirSync(PROJECT_EXTENSIONS_DIR)
+        .filter((f) => /\.(ts|js|mjs|tsx)$/.test(f))
+        .sort();
+      for (const file of extensionFiles) {
+        args.push("--extension", join(PROJECT_EXTENSIONS_DIR, file));
+      }
     }
     for (const text of this.appendSystemPrompt) args.push("--append-system-prompt", String(text));
     args.push(...this.extraArgs);

@@ -14,6 +14,13 @@ import { SYSTEM_APPEND, THINKING_LEVELS, normalizeThinking, safeId } from "./sha
 
 const SOURCES = ["web", "telegram", "api", "system"];
 
+/**
+ * رد أمر prompt قد يتأخر حتى ينتهي preflight، وهو ينتظر أوامر الإضافات
+ * وحواراتها (موافقة الأدوات مثلاً). مهلة الجسر العامة 30s قصيرة جداً هنا
+ * فتُظهر خطأ وهمياً بينما الحوار ما زال مفتوحاً؛ نمنحها 10 دقائق.
+ */
+const PROMPT_TIMEOUT_MS = 10 * 60_000;
+
 export class RpcConversation {
   constructor(id, manager) {
     this.id = id;
@@ -25,6 +32,8 @@ export class RpcConversation {
     this.busy = false;
     this.transcript = [];
     this.queue = new EventQueue();
+    // حوارات امتدادات معلّقة: id → { respond(payload), cancel() }.
+    this.pendingUI = new Map();
     this.state = { contextUsage: null, thinkingLevels: null, toolNames: [] };
     this.remote = {
       sessionId: null,
@@ -146,8 +155,12 @@ export class RpcConversation {
 
     // نربط المستمعين قبل التشغيل حتى لا تضيع أحداث سريعة.
     client.on("event", (record) => this.#onRecord(record));
+    // حوارات الامتدادات تُسلَّم للمشتركين (الويب/تيليجرام) عبر حدث extension_ui،
+    // وننتظر ردهم عبر respondExtensionUI. بدون هذا المعالج يلغيها الجسر فوراً.
+    client.onExtensionUI((request, respond) => this.#awaitExtensionDialog(request, respond));
     client.on("restarting", ({ attempt, delay }) => {
       this.busy = false;
+      this.#cancelPendingUI();
       this.#emit({ type: "error", message: `انقطع جسر RPC، إعادة تشغيل (${attempt}) بعد ${delay}ms…` });
     });
     client.on("restarted", () => {
@@ -157,12 +170,14 @@ export class RpcConversation {
     client.on("fatal", (info) => {
       this.busy = false;
       this.remote.isStreaming = false;
+      this.#cancelPendingUI();
       const detail = info?.error?.message || `code=${info?.code ?? "-"} signal=${info?.signal || "-"}`;
       this.#emit({ type: "error", message: `توقّف جسر RPC نهائياً: ${detail}` });
     });
     client.on("exit", ({ intentional }) => {
       this.busy = false;
       this.remote.isStreaming = false;
+      this.#cancelPendingUI();
       if (!intentional) logger.warn(`[${this.id}] خرجت عملية pi بشكل غير متوقع.`);
     });
 
@@ -372,7 +387,10 @@ export class RpcConversation {
     this.busy = true;
     this.remote.isStreaming = true;
     try {
-      const data = await client.send({ type: "prompt", message: String(text) });
+      const data = await client.send(
+        { type: "prompt", message: String(text) },
+        { timeoutMs: PROMPT_TIMEOUT_MS },
+      );
       if (data?.disposition === "handled") {
         // لا تشغيل فعلي (أمر إضافة استهلك الرسالة)؛ لن يصل agent_settled.
         this.busy = false;
@@ -385,6 +403,64 @@ export class RpcConversation {
       this.#emit({ type: "error", message: err?.message || String(err) });
       throw err;
     }
+  }
+
+  /**
+   * يردّ على حوار إضافة معلّق (select/confirm/input/editor).
+   * payload: { value } | { confirmed } | { cancelled: true }
+   * @returns {Promise<boolean>} true إن أُرسل الرد فعلاً.
+   */
+  async respondExtensionUI(id, payload = {}) {
+    if (!id) return false;
+    const pending = this.pendingUI.get(id);
+    if (pending) {
+      pending.respond(payload);
+      this.touch();
+      return true;
+    }
+    // احتياط: قد يصل الرد بعد إعادة تشغيل/إعادة ربط؛ نمرّره إن أمكن.
+    const client = this.client;
+    if (!client) return false;
+    await client.respond(id, payload);
+    this.touch();
+    return true;
+  }
+
+  /** ينتظر رد المشتركين على حوار إضافة ثم يرسله إلى pi. */
+  #awaitExtensionDialog(request, respond) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (payload, send) => {
+        if (settled) return;
+        settled = true;
+        this.pendingUI.delete(request.id);
+        if (!send) {
+          resolve();
+          return;
+        }
+        Promise.resolve()
+          .then(() => respond(payload))
+          .catch((err) => logger.debug(`[${this.id}] رد الحوار:`, err?.message || err))
+          .finally(resolve);
+      };
+      this.pendingUI.set(request.id, {
+        respond: (payload) => settle(payload, true),
+        cancel: () => settle(null, false),
+      });
+    });
+  }
+
+  /** إغلاق كل الحوارات المعلّقة دون إرسال (بعد خروج العملية أو إغلاق الجلسة). */
+  #cancelPendingUI() {
+    if (!this.pendingUI.size) return;
+    for (const entry of this.pendingUI.values()) {
+      try {
+        entry.cancel();
+      } catch {
+        /* تجاهل */
+      }
+    }
+    this.pendingUI.clear();
   }
 
   async abort() {
@@ -523,6 +599,7 @@ export class RpcConversation {
     this.client = null;
     this.busy = false;
     this.remote.isStreaming = false;
+    this.#cancelPendingUI();
     if (!client) return;
     try {
       await client.dispose();
@@ -535,6 +612,7 @@ export class RpcConversation {
     const client = this.client;
     this.client = null;
     this.busy = false;
+    this.#cancelPendingUI();
     this.listeners.clear();
     if (client) {
       try {

@@ -50,6 +50,14 @@ const els = {
   controlSubtitle: $("#controlSubtitle"),
   controlBtnSide: $("#controlBtnSide"),
   controlBtnTop: $("#controlBtnTop"),
+  editorStatus: $("#editorStatus"),
+  editorWidgets: $("#editorWidgets"),
+  extUiDialog: $("#extUiDialog"),
+  extUiTitle: $("#extUiTitle"),
+  extUiBody: $("#extUiBody"),
+  extUiClose: $("#extUiClose"),
+  extUiKeysHint: $("#extUiKeysHint"),
+  extUiTimer: $("#extUiTimer"),
 };
 
 const THINKING_LABELS = {
@@ -96,6 +104,18 @@ const state = {
     keyFor: null,
     showAllProviders: false,
     refreshTimer: null,
+  },
+  // C1: حوارات الامتدادات وحالة المحرر التي ترسلها الإضافات.
+  extUi: {
+    queue: [],
+    current: null,
+    options: [],
+    activeIndex: 0,
+    countdown: null,
+    deadline: 0,
+    statuses: new Map(),
+    widgets: new Map(),
+    collapsedWidgets: new Set(),
   },
 };
 
@@ -958,6 +978,7 @@ function handleServerMessage(message) {
       renderTranscript(message.transcript || []);
       applyState(message.state);
       setConnected(true);
+      resetExtensionUI();
       break;
     case "state":
       applyState(message.state);
@@ -1010,6 +1031,9 @@ function handleServerMessage(message) {
     case "event":
       handleConversationEvent(message.event);
       break;
+    case "extension_ui":
+      handleExtensionUI(message.request);
+      break;
     default:
       break;
   }
@@ -1020,6 +1044,379 @@ function restoreHero() {
   els.messages.insertAdjacentHTML("afterbegin", HERO_HTML);
   els.hero = els.messages.querySelector(".hero");
   bindSuggestions(els.messages);
+}
+
+/* ===== C1: حوارات الامتدادات (extension_ui) ===== */
+
+const EXT_UI_KEYBOARD_HINT = "Enter للتأكيد · Esc للإلغاء · 1-9 اختيار سريع";
+
+function extensionUiDialogOpen() {
+  return !!state.extUi.current;
+}
+
+function resetExtensionUI() {
+  const ui = state.extUi;
+  if (ui.countdown) {
+    clearInterval(ui.countdown);
+    ui.countdown = null;
+  }
+  ui.queue = [];
+  ui.current = null;
+  ui.options = [];
+  ui.activeIndex = 0;
+  ui.deadline = 0;
+  els.extUiDialog?.classList.add("hidden");
+  if (els.extUiTimer) els.extUiTimer.textContent = "";
+}
+
+function notifyToastKind(type) {
+  if (type === "error") return "error";
+  if (type === "warning" || type === "warn") return "warn";
+  return "";
+}
+
+function handleExtensionUI(request) {
+  if (!request || typeof request !== "object" || !request.method) return;
+  switch (request.method) {
+    case "select":
+    case "confirm":
+    case "input":
+    case "editor":
+      state.extUi.queue.push(request);
+      showNextExtensionDialog();
+      return;
+    case "notify":
+      toast(request.message || request.title || "", notifyToastKind(request.notifyType));
+      return;
+    case "setStatus":
+      setExtensionStatus(request.statusKey, request.statusText);
+      return;
+    case "setWidget":
+      setExtensionWidget(request.widgetKey, request.widgetLines, request.widgetPlacement);
+      return;
+    case "setTitle":
+      if (request.title) document.title = String(request.title);
+      return;
+    case "set_editor_text":
+      if (typeof request.text === "string") {
+        els.input.value = request.text;
+        autoResize();
+        els.input.focus();
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+function setExtensionStatus(key, text) {
+  const id = key || "default";
+  if (text === null || text === undefined || text === "") state.extUi.statuses.delete(id);
+  else state.extUi.statuses.set(id, String(text));
+  renderExtensionStatus();
+}
+
+function renderExtensionStatus() {
+  if (!els.editorStatus) return;
+  const values = [...state.extUi.statuses.values()].filter(Boolean);
+  els.editorStatus.textContent = values.join("  ·  ");
+  els.editorStatus.classList.toggle("hidden", values.length === 0);
+}
+
+function setExtensionWidget(key, lines, placement) {
+  const id = key || "default";
+  if (!Array.isArray(lines) || lines.length === 0) state.extUi.widgets.delete(id);
+  else
+    state.extUi.widgets.set(id, {
+      lines: lines.map((line) => String(line)),
+      placement: placement === "belowEditor" ? "belowEditor" : "aboveEditor",
+    });
+  renderExtensionWidgets();
+}
+
+function renderExtensionWidgets() {
+  if (!els.editorWidgets) return;
+  els.editorWidgets.innerHTML = "";
+  const collapsed = state.extUi.collapsedWidgets;
+  const entries = [...state.extUi.widgets.entries()].sort((a, b) => {
+    const rank = (entry) => (entry[1].placement === "belowEditor" ? 1 : 0);
+    return rank(a) - rank(b);
+  });
+  for (const [key, widget] of entries) {
+    const panel = document.createElement("div");
+    panel.className = `ext-widget${collapsed.has(key) ? " collapsed" : ""}`;
+    panel.dataset.key = key;
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "ext-widget-head";
+    head.setAttribute("aria-expanded", String(!collapsed.has(key)));
+    const title = document.createElement("span");
+    title.className = "ext-widget-title";
+    title.dir = "auto";
+    title.textContent = `🔧 ${key}`;
+    const chevron = document.createElement("span");
+    chevron.className = "ext-widget-chevron";
+    chevron.textContent = "▾";
+    head.append(title, chevron);
+    head.addEventListener("click", () => {
+      if (collapsed.has(key)) collapsed.delete(key);
+      else collapsed.add(key);
+      renderExtensionWidgets();
+    });
+
+    const body = document.createElement("div");
+    body.className = "ext-widget-body";
+    const pre = document.createElement("pre");
+    pre.dir = "auto";
+    pre.textContent = widget.lines.join("\n");
+    body.appendChild(pre);
+
+    panel.append(head, body);
+    els.editorWidgets.appendChild(panel);
+  }
+}
+
+function showNextExtensionDialog() {
+  const ui = state.extUi;
+  if (ui.current) return;
+  const request = ui.queue.shift();
+  if (!request) return;
+  ui.current = request;
+  ui.options = [];
+  ui.activeIndex = 0;
+  renderExtensionDialog(request);
+}
+
+function renderExtensionDialog(request) {
+  const body = els.extUiBody;
+  if (!body || !els.extUiDialog) return;
+  body.innerHTML = "";
+  els.extUiTitle.textContent = request.title || request.message || "طلب من إضافة";
+  els.extUiDialog.dataset.method = request.method;
+  els.extUiDialog.classList.remove("hidden");
+  els.extUiKeysHint.textContent =
+    request.method === "editor" ? "Ctrl+Enter للحفظ · Esc للإلغاء" : EXT_UI_KEYBOARD_HINT;
+
+  const addMessage = (text) => {
+    if (!text) return;
+    const p = document.createElement("p");
+    p.className = "ext-ui-msg";
+    p.dir = "auto";
+    p.textContent = text;
+    body.appendChild(p);
+  };
+
+  if (request.method === "select" || request.method === "confirm") {
+    if (request.message && request.message !== request.title) addMessage(request.message);
+    const options =
+      request.method === "confirm"
+        ? ["نعم", "لا"]
+        : Array.isArray(request.options) && request.options.length
+          ? request.options.map((value) => String(value))
+          : ["موافق", "إلغاء"];
+    state.extUi.options = options;
+    const list = document.createElement("div");
+    list.className = "ui-options";
+    options.forEach((label, index) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `ui-option${index === 0 ? " active" : ""}`;
+      btn.dataset.index = String(index);
+      if (/رفض|إلغاء|لا\b|deny|cancel|reject|block/i.test(label)) btn.dataset.tone = "deny";
+      const key = document.createElement("span");
+      key.className = "ui-key";
+      key.textContent = String(index + 1);
+      const text = document.createElement("span");
+      text.className = "ui-label";
+      text.dir = "auto";
+      text.textContent = label;
+      btn.append(key, text);
+      btn.addEventListener("click", () => chooseExtensionOption(index));
+      btn.addEventListener("focus", () => {
+        state.extUi.activeIndex = index;
+        updateActiveExtensionOption();
+      });
+      list.appendChild(btn);
+    });
+    body.appendChild(list);
+  } else {
+    if (request.message) addMessage(request.message);
+    const field = document.createElement("div");
+    field.className = "ui-field";
+    const input =
+      request.method === "editor" ? document.createElement("textarea") : document.createElement("input");
+    input.value = request.prefill || "";
+    input.dir = "auto";
+    if (request.method === "editor") input.rows = 10;
+    else {
+      input.type = "text";
+      input.placeholder = request.placeholder || "";
+    }
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      if (request.method === "editor" && !(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      submitExtensionInput();
+    });
+    field.appendChild(input);
+    body.appendChild(field);
+
+    const actions = document.createElement("div");
+    actions.className = "ui-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "ui-btn primary";
+    save.textContent = request.method === "editor" ? "حفظ" : "تأكيد";
+    save.addEventListener("click", () => submitExtensionInput());
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ui-btn ghost";
+    cancel.textContent = "إلغاء";
+    cancel.addEventListener("click", () => cancelExtensionDialog());
+    actions.append(save, cancel);
+    body.appendChild(actions);
+
+    setTimeout(() => input.focus(), 0);
+  }
+
+  startExtensionCountdown(request);
+  if (request.method === "select" || request.method === "confirm") {
+    setTimeout(() => els.extUiDialog?.focus(), 0);
+  }
+}
+
+function startExtensionCountdown(request) {
+  const ui = state.extUi;
+  if (ui.countdown) {
+    clearInterval(ui.countdown);
+    ui.countdown = null;
+  }
+  if (els.extUiTimer) els.extUiTimer.textContent = "";
+  const timeout = Number(request.timeout);
+  if (!Number.isFinite(timeout) || timeout <= 0) return;
+  ui.deadline = Date.now() + timeout;
+  const tick = () => {
+    const left = Math.max(0, ui.deadline - Date.now());
+    if (els.extUiTimer) els.extUiTimer.textContent = left > 0 ? `⏳ ${Math.ceil(left / 1000)}s` : "";
+    if (left > 0) return;
+    // pi نفسه يحلّ الحوار عند المهلة؛ نغلق محلياً وننظّف التتبّع على الخادم فقط.
+    const id = ui.current?.id;
+    if (id) send({ type: "extension_ui_dismiss", id });
+    finishExtensionDialog();
+  };
+  tick();
+  ui.countdown = setInterval(tick, 500);
+}
+
+function updateActiveExtensionOption() {
+  const buttons = els.extUiBody?.querySelectorAll(".ui-option") || [];
+  buttons.forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.index) === state.extUi.activeIndex);
+  });
+}
+
+function chooseExtensionOption(index) {
+  const ui = state.extUi;
+  const request = ui.current;
+  if (!request) return;
+  const position = Number(index);
+  if (!Number.isFinite(position) || position < 0 || position >= ui.options.length) return;
+  if (request.method === "confirm") {
+    resolveExtensionDialog({ confirmed: position === 0 });
+    return;
+  }
+  resolveExtensionDialog({ value: ui.options[position] });
+}
+
+function submitExtensionInput() {
+  const request = state.extUi.current;
+  if (!request || (request.method !== "input" && request.method !== "editor")) return;
+  const field = els.extUiBody?.querySelector(".ui-field input, .ui-field textarea");
+  resolveExtensionDialog({ value: field ? field.value : "" });
+}
+
+function cancelExtensionDialog() {
+  if (!state.extUi.current) return;
+  resolveExtensionDialog({ cancelled: true });
+}
+
+function resolveExtensionDialog(payload) {
+  const request = state.extUi.current;
+  if (!request) return;
+  if (!request.expectsResponse) {
+    finishExtensionDialog();
+    return;
+  }
+  send({ type: "extension_ui_response", id: request.id, ...payload });
+  finishExtensionDialog();
+}
+
+function finishExtensionDialog() {
+  const ui = state.extUi;
+  if (ui.countdown) {
+    clearInterval(ui.countdown);
+    ui.countdown = null;
+  }
+  ui.current = null;
+  ui.options = [];
+  ui.activeIndex = 0;
+  ui.deadline = 0;
+  if (els.extUiTimer) els.extUiTimer.textContent = "";
+  els.extUiDialog?.classList.add("hidden");
+  setTimeout(showNextExtensionDialog, 60);
+}
+
+function onExtensionDialogKeydown(event) {
+  if (!extensionUiDialogOpen()) return;
+  const request = state.extUi.current;
+  if (!request) return;
+  const target = event.target;
+  const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelExtensionDialog();
+    return;
+  }
+
+  if (event.key === "Enter") {
+    if (request.method === "editor") {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        submitExtensionInput();
+      }
+      return; // Enter عادي = سطر جديد داخل المحرر
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (request.method === "input") submitExtensionInput();
+    else chooseExtensionOption(state.extUi.activeIndex);
+    return;
+  }
+
+  if (!typing && /^[1-9]$/.test(event.key)) {
+    const index = Number(event.key) - 1;
+    if (index < state.extUi.options.length) {
+      event.preventDefault();
+      event.stopPropagation();
+      chooseExtensionOption(index);
+    }
+    return;
+  }
+
+  if (!typing && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    if (!state.extUi.options.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const total = state.extUi.options.length;
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    state.extUi.activeIndex = (state.extUi.activeIndex + delta + total) % total;
+    updateActiveExtensionOption();
+  }
 }
 
 /* ===== WebSocket ===== */
@@ -1054,6 +1451,8 @@ function connect() {
   });
   ws.addEventListener("close", () => {
     setConnected(false);
+    // الخادم يلغي حوارات هذا الاتصال عند الانقطاع؛ لا نُبقي نوافذ معلّقة.
+    resetExtensionUI();
     if (manualClose) return;
     const delay = state.reconnectDelay;
     state.reconnectDelay = Math.min(state.reconnectDelay * 1.6, 15000);
@@ -1124,6 +1523,13 @@ function bindUi() {
   els.statusClose.addEventListener("click", () => els.statusModal.classList.add("hidden"));
   els.statusModal.addEventListener("click", (e) => {
     if (e.target === els.statusModal) els.statusModal.classList.add("hidden");
+  });
+
+  // C1: حوار الامتدادات — Esc/Enter/الأرقام + زر الإغلاق.
+  els.extUiDialog?.addEventListener("keydown", onExtensionDialogKeydown);
+  els.extUiClose?.addEventListener("click", () => cancelExtensionDialog());
+  els.extUiDialog?.addEventListener("click", (event) => {
+    if (event.target === els.extUiDialog) cancelExtensionDialog();
   });
 
   els.compactBtn.addEventListener("click", () => send({ type: "compact" }));

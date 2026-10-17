@@ -36,6 +36,28 @@ const MIME = {
   ".map": "application/json; charset=utf-8",
 };
 
+/** يبني طلب حوار موحّداً للعميل من حدث extension_ui. */
+function extensionUiRequest(event) {
+  return {
+    id: event.requestId,
+    method: event.method,
+    title: event.title || "",
+    message: event.message || "",
+    options: Array.isArray(event.options) ? event.options : [],
+    placeholder: event.placeholder || "",
+    prefill: event.prefill || "",
+    notifyType: event.notifyType || "info",
+    statusKey: event.statusKey ?? null,
+    statusText: event.statusText ?? null,
+    widgetKey: event.widgetKey ?? null,
+    widgetLines: Array.isArray(event.widgetLines) ? event.widgetLines : null,
+    widgetPlacement: event.widgetPlacement || null,
+    timeout: event.timeout ?? null,
+    text: typeof event.text === "string" ? event.text : null,
+    expectsResponse: !!event.expectsResponse,
+  };
+}
+
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -488,7 +510,7 @@ export class WebServer {
         : `web:${Math.random().toString(36).slice(2, 10)}`;
     const conversationId = (requestedId || fallbackId).slice(0, 120);
 
-    this.clients.set(ws, { conversationId, unsubscribe: null });
+    this.clients.set(ws, { conversationId, unsubscribe: null, pendingUI: new Set() });
 
     const send = (message) => {
       if (ws.readyState === ws.OPEN) {
@@ -500,9 +522,26 @@ export class WebServer {
       }
     };
 
+    // إلغاء حوارات الإضافة المعلّقة لهذا الاتصال (عند الانقطاع أو تغيير الجلسة).
+    const cancelPendingDialogs = () => {
+      const entry = this.clients.get(ws);
+      if (!entry?.pendingUI?.size) return;
+      const conversation = this.manager.get(entry.conversationId);
+      for (const requestId of entry.pendingUI) {
+        try {
+          const result = conversation?.respondExtensionUI(requestId, { cancelled: true });
+          if (result && typeof result.catch === "function") result.catch(() => undefined);
+        } catch {
+          /* تجاهل: الاتصال انقطع أو الجسر أُغلق */
+        }
+      }
+      entry.pendingUI.clear();
+    };
+
     const bind = async (id) => {
       const existing = this.clients.get(ws);
       existing.unsubscribe?.();
+      if (existing.conversationId !== id) cancelPendingDialogs();
       const conversation = this.manager.getOrCreate(id);
       let transcript = [];
       try {
@@ -513,6 +552,13 @@ export class WebServer {
       }
       const unsubscribe = conversation.subscribe((event) => {
         send({ type: "event", event });
+        if (event.type !== "extension_ui") return;
+        // جسر حوارات الامتدادات: رسالة مخصّصة أوضح للعميل + تتبّع الحوارات المعلّقة.
+        send({ type: "extension_ui", conversationId: id, request: extensionUiRequest(event) });
+        const entry = this.clients.get(ws);
+        if (entry?.pendingUI && event.expectsResponse && event.requestId) {
+          entry.pendingUI.add(event.requestId);
+        }
       });
       existing.conversationId = id;
       existing.unsubscribe = unsubscribe;
@@ -614,6 +660,31 @@ export class WebServer {
             send({ type: "notice", message: "♻️ جارٍ إعادة تشغيل الخادم…" });
             setTimeout(() => this.onRestart?.("web"), 250);
             break;
+          case "extension_ui_response": {
+            const requestId = msg.id || msg.requestId;
+            if (!requestId) break;
+            const payload = msg.cancelled
+              ? { cancelled: true }
+              : {
+                  ...(msg.value !== undefined ? { value: msg.value } : {}),
+                  ...(msg.confirmed !== undefined ? { confirmed: !!msg.confirmed } : {}),
+                };
+            // لا نرسل رداً فارغاً: الإلغاء هو الافتراضي الآمن.
+            if (!msg.cancelled && payload.value === undefined && payload.confirmed === undefined) {
+              payload.cancelled = true;
+            }
+            entry?.pendingUI?.delete(requestId);
+            await conversation.respondExtensionUI(requestId, payload);
+            break;
+          }
+          case "extension_ui_dismiss":
+            // إغلاق محلي (مهلة انتهت في المتصفح): نحرّر الحوار المعلّق.
+            // pi يتجاهل الرد إن كان قد حلّ الحوار تلقائياً بمهلته.
+            if (msg.id) {
+              entry?.pendingUI?.delete(msg.id);
+              await conversation.respondExtensionUI(msg.id, { cancelled: true });
+            }
+            break;
           case "bind":
             await bind(String(msg.conversationId || entry.conversationId));
             break;
@@ -626,11 +697,13 @@ export class WebServer {
     });
 
     ws.on("close", () => {
+      cancelPendingDialogs();
       const entry = this.clients.get(ws);
       entry?.unsubscribe?.();
       this.clients.delete(ws);
     });
     ws.on("error", () => {
+      cancelPendingDialogs();
       const entry = this.clients.get(ws);
       entry?.unsubscribe?.();
       this.clients.delete(ws);

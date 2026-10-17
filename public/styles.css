@@ -2148,3 +2148,296 @@ html[data-theme="dark"] .topbar-controls::-webkit-scrollbar {
     height: 42px;
   }
 }
+
+/* ==========================================================================
+   C1 — حوارات الامتدادات وحالة المحرر (extension_ui)
+   ========================================================================== */
+
+.toast.warn {
+  border-inline-start-color: #f59e0b;
+}
+
+.editor-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px clamp(14px, 4vw, 60px) 0;
+  max-width: 100%;
+}
+.editor-extras:empty {
+  display: none;
+}
+
+/* شريط الحالة (setStatus) فوق المحرر */
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 11px;
+  padding: 8px 12px;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+.editor-status::before {
+  content: "●";
+  color: var(--accent-2);
+  font-size: 0.7rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* لوحة الودجات (setWidget) — قابلة للطي */
+.editor-widgets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+.ext-widget {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.ext-widget-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ext-widget-head:hover {
+  color: var(--accent);
+}
+.ext-widget-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ext-widget-chevron {
+  color: var(--muted);
+  font-size: 0.7rem;
+  transition: transform var(--trans);
+}
+.ext-widget.collapsed .ext-widget-chevron {
+  transform: rotate(-90deg);
+}
+.ext-widget-body {
+  padding: 0 12px 9px;
+}
+.ext-widget.collapsed .ext-widget-body {
+  display: none;
+}
+.ext-widget-body pre {
+  margin: 0;
+  max-height: 168px;
+  overflow: auto;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* نافذة الحوار الموحّدة (select / confirm / input / editor) */
+.modal.ext-ui {
+  z-index: 80;
+  padding: 16px;
+}
+.ext-ui-card {
+  width: min(560px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal.ext-ui:focus {
+  outline: none;
+}
+.ext-ui-head {
+  gap: 12px;
+  align-items: flex-start;
+}
+.ext-ui-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: start;
+  flex: 1;
+  min-width: 0;
+}
+.ext-ui-body {
+  overflow: auto;
+  gap: 12px;
+}
+.ext-ui-msg {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-options {
+  display: grid;
+  gap: 8px;
+}
+.ui-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+  text-align: start;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ui-option:hover,
+.ui-option:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+.ui-option.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.ui-option[data-tone="deny"] .ui-key {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+.ui-key {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ui-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ui-field input,
+.ui-field textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  padding: 10px 12px;
+  outline: none;
+  transition: var(--trans);
+}
+.ui-field textarea {
+  min-height: 150px;
+  resize: vertical;
+  white-space: pre-wrap;
+}
+.ui-field input:focus,
+.ui-field textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.ui-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ui-btn {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-family: inherit;
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ui-btn.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #08122b;
+}
+.ui-btn.ghost {
+  background: transparent;
+  color: var(--text);
+}
+.ui-btn:hover {
+  transform: translateY(-1px);
+}
+.ext-ui-keys {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 18px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.ext-ui-timer {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .editor-extras {
+    padding: 8px 12px 0;
+  }
+  .ext-ui-keys {
+    padding: 8px 14px 11px;
+    font-size: 0.66rem;
+  }
+  .ext-ui-card {
+    width: 96vw;
+  }
+}
+
+/* الثيم الداكن: نفس المتغيّرات، مع تعزيز الحدود المعدنية */
+html[data-theme="dark"] .editor-status,
+html[data-theme="dark"] .ext-widget,
+html[data-theme="dark"] .ui-option,
+html[data-theme="dark"] .ui-field input,
+html[data-theme="dark"] .ui-field textarea {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+html[data-theme="dark"] .editor-status {
+  border-inline-start-color: var(--accent);
+}
+html[data-theme="dark"] .ui-option.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}

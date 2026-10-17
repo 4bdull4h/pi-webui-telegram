@@ -66,6 +66,8 @@ export function describeExtensionUI(request) {
     widgetLines: Array.isArray(request.widgetLines) ? request.widgetLines : null,
     widgetPlacement: request.widgetPlacement || null,
     timeout: request.timeout ?? null,
+    // set_editor_text يمرّر النص في text، وsetTitle يمرّره في title.
+    text: typeof request.text === "string" ? request.text : null,
     expectsResponse: DIALOG_METHODS.has(request.method),
   };
 }

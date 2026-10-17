@@ -118,6 +118,11 @@
           </div>
         </section>
 
+        <section class="editor-extras" id="editorExtras" aria-live="polite">
+          <div class="editor-widgets" id="editorWidgets"></div>
+          <div class="editor-status hidden" id="editorStatus" role="status"></div>
+        </section>
+
         <footer class="composer">
           <div class="composer-inner">
             <textarea id="input" rows="1" placeholder="اكتب فكرتك… ✦˚  (Enter للإرسال، Shift+Enter لسطر جديد)"></textarea>
@@ -132,6 +137,20 @@
     </div>
 
     <div class="toast-wrap" id="toasts"></div>
+
+    <div class="modal ext-ui hidden" id="extUiDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="extUiTitle">
+      <div class="modal-card ext-ui-card">
+        <div class="modal-head ext-ui-head">
+          <h3 id="extUiTitle">طلب من إضافة</h3>
+          <button class="icon-btn" id="extUiClose" aria-label="إلغاء الحوار" title="إلغاء (Esc)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </div>
+        <div class="modal-body ext-ui-body" id="extUiBody"></div>
+        <div class="ext-ui-keys">
+          <span id="extUiKeysHint">Enter للتأكيد · Esc للإلغاء · 1-9 اختيار سريع</span>
+          <span class="ext-ui-timer" id="extUiTimer"></span>
+        </div>
+      </div>
+    </div>
 
     <div class="modal control hidden" id="controlCenter" role="dialog" aria-modal="true" aria-label="مركز التحكم">
       <div class="control-card">
