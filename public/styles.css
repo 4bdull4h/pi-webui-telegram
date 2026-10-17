@@ -4294,3 +4294,225 @@ html[data-theme="light"] {
     transition: none !important;
   }
 }
+
+/* ===== B4b + B5: نافذة شجرة الجلسة (تفريع/نسخة) + تذييل التصدير والنسخ ===== */
+.tree-dialog {
+  border: 0;
+  padding: 0;
+  margin: auto;
+  background: transparent;
+  color: var(--text);
+  max-width: min(760px, 96vw);
+  max-height: 90vh;
+}
+.tree-dialog::backdrop {
+  background: rgba(4, 8, 20, 0.55);
+  backdrop-filter: blur(3px);
+}
+html[data-theme="light"] .tree-dialog::backdrop {
+  background: rgba(24, 32, 60, 0.28);
+}
+.tree-card {
+  direction: rtl;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(760px, 96vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tree-head {
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tree-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
+}
+.tree-btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: var(--trans);
+}
+.tree-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.tree-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.tree-body {
+  overflow: auto;
+  max-height: 60vh;
+  padding: 10px 14px 14px;
+}
+.tree-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+  font-size: 0.8rem;
+  transition: var(--trans);
+}
+.tree-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.tree-row.leaf {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.tree-icon {
+  flex: 0 0 auto;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.tree-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.tree-time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+.tree-twisty {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.tree-twisty:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.tree-twisty.spacer {
+  cursor: default;
+}
+.tree-fork {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: var(--trans);
+}
+.tree-row:hover .tree-fork,
+.tree-fork:focus-visible {
+  opacity: 1;
+}
+.tree-fork:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tree-empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 34px 18px;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  color: var(--muted);
+}
+.tree-empty-icon {
+  font-size: 1.8rem;
+  line-height: 1;
+}
+.tree-empty h4 {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text);
+}
+.tree-empty p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.8;
+  max-width: 44ch;
+}
+.tree-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+}
+.tree-foot-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-inline-start: auto;
+}
+
+@media (max-width: 720px) {
+  .tree-body {
+    max-height: 52vh;
+    padding: 8px 10px 12px;
+  }
+  .tree-btn {
+    font-size: 0.74rem;
+    padding: 6px 9px;
+  }
+  .tree-fork {
+    opacity: 1;
+  }
+  .tree-foot-note {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-btn,
+  .tree-row,
+  .tree-fork,
+  .tree-twisty {
+    transition: none !important;
+  }
+  .tree-btn:hover:not(:disabled) {
+    transform: none !important;
+  }
+}

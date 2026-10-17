@@ -25,6 +25,16 @@ const els = {
   thinkingSelect: $("#thinkingSelect"),
   sessionBadge: $("#sessionBadge"),
   statusBtn: $("#statusBtn"),
+  // B4b/B5: شجرة الجلسة + تصدير/نسخ
+  treeBtn: $("#treeBtn"),
+  treeDialog: $("#treeDialog"),
+  treeBody: $("#treeBody"),
+  treeClose: $("#treeClose"),
+  treeRefresh: $("#treeRefresh"),
+  treeClone: $("#treeClone"),
+  treeExport: $("#treeExport"),
+  treeCopyLast: $("#treeCopyLast"),
+  treeFootNote: $("#treeFootNote"),
   statusModal: $("#statusModal"),
   statusClose: $("#statusClose"),
   statusBody: $("#statusBody"),
@@ -3228,6 +3238,406 @@ function rejectPendingRpc(message) {
 }
 
 /* ========================================================================
+ * B4b: شجرة الجلسة (get_tree / fork / clone)
+ * B5: تصدير HTML + نسخ آخر رد للمساعد
+ * كلها تمرّ عبر rpcCall أعلاه — لا مسار جديد على الخادم.
+ * ======================================================================== */
+
+const treeView = {
+  tree: [],
+  leafId: null,
+  collapsed: new Set(),
+  loading: false,
+  error: null,
+};
+
+function treeEntryOf(node) {
+  return node && typeof node === "object" ? node.entry || null : null;
+}
+
+/** أيقونة الدور لكل عقدة. */
+function treeIcon(entry) {
+  const role = entry?.message?.role;
+  if (role === "user") return { icon: "👤", label: "مستخدم" };
+  if (role === "assistant") return { icon: "🤖", label: "مساعد" };
+  if (role === "toolResult" || role === "tool") return { icon: "🛠️", label: "أداة" };
+  return { icon: "•", label: entry?.type || "مدخل" };
+}
+
+/** نص مختصر (٩٠ حرفاً) للعقدة. */
+function treeSnippet(entry) {
+  const message = entry?.message;
+  let raw = "";
+  if (message) {
+    const content = message.content;
+    if (typeof content === "string") raw = content;
+    else if (Array.isArray(content)) {
+      const texts = content.filter((part) => part?.type === "text" && typeof part.text === "string");
+      if (texts.length) raw = texts.map((part) => part.text).join(" ");
+      else {
+        const call = content.find((part) => part?.type === "toolCall");
+        raw = call ? `⚙️ ${call.name || "tool"}` : "";
+      }
+    }
+    if (!raw && message.role === "toolResult") raw = `${message.toolName || "tool"}${message.isError ? " (خطأ)" : ""}`;
+  } else if (entry) {
+    raw = entry.label || entry.summary || entry.type || "";
+  }
+  const flat = String(raw).replace(/\s+/g, " ").trim();
+  if (!flat) return "(فارغ)";
+  return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat;
+}
+
+function treeStamp(entry) {
+  const ts = entry?.timestamp;
+  if (!ts) return "";
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "";
+  try {
+    return date.toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+/** مجموعة معرّفات العقد الواقعة على المسار المنتهي بالعقدة الحالية. */
+function treeLeafPath(tree, leafId) {
+  const path = new Set();
+  if (!leafId) return path;
+  const walk = (nodes, chain) => {
+    for (const node of nodes || []) {
+      const entry = treeEntryOf(node);
+      const id = entry?.id ? String(entry.id) : "";
+      if (!id) continue;
+      const next = [...chain, id];
+      if (id === String(leafId)) for (const key of next) path.add(key);
+      walk(node.children, next);
+    }
+  };
+  walk(tree, []);
+  return path;
+}
+
+/** الفروع المطويّة افتراضياً = كل فرع ليس على مسار العقدة الحالية. */
+function treeDefaultCollapsed(tree, leafId) {
+  const open = treeLeafPath(tree, leafId);
+  const collapsed = new Set();
+  const walk = (nodes) => {
+    for (const node of nodes || []) {
+      const entry = treeEntryOf(node);
+      const id = entry?.id ? String(entry.id) : "";
+      const children = Array.isArray(node.children) ? node.children : [];
+      if (id && children.length && !open.has(id)) collapsed.add(id);
+      walk(children);
+    }
+  };
+  walk(tree);
+  return collapsed;
+}
+
+function renderTreeView() {
+  const body = els.treeBody;
+  if (!body) return;
+  if (treeView.loading) {
+    body.innerHTML = `<div class="tree-empty"><span class="tree-empty-icon">🌳</span><h4>جارٍ تحميل الشجرة…</h4></div>`;
+    return;
+  }
+  if (treeView.error) {
+    body.innerHTML = `<div class="tree-empty"><span class="tree-empty-icon">⚠️</span><h4>تعذّر تحميل الشجرة</h4><p>${escapeHtml(treeView.error)}</p><button class="tree-btn" type="button" data-tree-retry="1">🔄 إعادة المحاولة</button></div>`;
+    return;
+  }
+  if (!treeView.tree.length) {
+    body.innerHTML = `<div class="tree-empty"><span class="tree-empty-icon">🌱</span><h4>لا توجد رسائل بعد</h4><p>أرسل أول رسالة ثم أعد فتح الشجرة — ستظهر هنا شجرة الرسائل والفروع، ويمكنك التفريع من أي رسالة مستخدم.</p></div>`;
+    return;
+  }
+  const rows = [];
+  const walk = (nodes, depth) => {
+    for (const node of nodes || []) {
+      const entry = treeEntryOf(node) || {};
+      const id = entry.id ? String(entry.id) : "";
+      const children = Array.isArray(node.children) ? node.children : [];
+      const collapsed = id ? treeView.collapsed.has(id) : false;
+      const { icon, label } = treeIcon(entry);
+      const isLeaf = !!id && id === String(treeView.leafId || "");
+      const snippet = escapeHtml(treeSnippet(entry));
+      const stamp = escapeHtml(treeStamp(entry));
+      const twisty = children.length
+        ? `<button class="tree-twisty" type="button" data-tree-toggle="${escapeHtml(id)}" aria-expanded="${collapsed ? "false" : "true"}" title="${collapsed ? "توسيع الفرع" : "طي الفرع"}">${collapsed ? "▸" : "▾"}</button>`
+        : `<span class="tree-twisty spacer" aria-hidden="true"></span>`;
+      const forkBtn =
+        entry.message?.role === "user" && !treeView.loading
+          ? `<button class="tree-fork" type="button" data-tree-fork="${escapeHtml(id)}" title="تفريع جلسة جديدة من هذه الرسالة">🌿 تفريع من هنا</button>`
+          : "";
+      rows.push(
+        `<div class="tree-row${isLeaf ? " leaf" : ""}" data-entry-id="${escapeHtml(id)}" style="padding-inline-start:${8 + depth * 14}px" title="${escapeHtml(label)}">` +
+          twisty +
+          `<span class="tree-icon" aria-hidden="true">${icon}</span>` +
+          `<span class="tree-text">${snippet}</span>` +
+          (stamp ? `<span class="tree-time" dir="ltr">${stamp}</span>` : "") +
+          forkBtn +
+        `</div>`,
+      );
+      if (children.length && !collapsed) walk(children, depth + 1);
+    }
+  };
+  walk(treeView.tree, 0);
+  body.innerHTML = `<div class="tree-scroll">${rows.join("")}</div>`;
+  const current = body.querySelector(".tree-row.leaf");
+  if (current) current.scrollIntoView({ block: "nearest" });
+}
+
+async function loadTree({ silent = false } = {}) {
+  if (!silent) {
+    treeView.loading = true;
+    treeView.error = null;
+    renderTreeView();
+  }
+  try {
+    const data = await rpcCall("get_tree", {}, { timeoutMs: 30_000 });
+    treeView.tree = Array.isArray(data?.tree) ? data.tree : [];
+    treeView.leafId = data?.leafId ?? null;
+    treeView.collapsed = treeDefaultCollapsed(treeView.tree, treeView.leafId);
+    treeView.error = null;
+  } catch (err) {
+    treeView.tree = [];
+    treeView.leafId = null;
+    treeView.collapsed = new Set();
+    treeView.error = err?.message || String(err);
+  } finally {
+    treeView.loading = false;
+    renderTreeView();
+  }
+}
+
+function openTreeDialog() {
+  if (!els.treeDialog) return;
+  if (typeof els.treeDialog.showModal === "function") {
+    if (!els.treeDialog.open) els.treeDialog.showModal();
+  } else {
+    els.treeDialog.setAttribute("open", "");
+  }
+  void loadTree();
+}
+
+function closeTreeDialog() {
+  if (!els.treeDialog) return;
+  if (typeof els.treeDialog.close === "function" && els.treeDialog.open) els.treeDialog.close();
+  else els.treeDialog.removeAttribute("open");
+}
+
+/**
+ * بعد fork/clone: نطلب سجلاً محدّثاً من pi (يحدّث كاش الخادم) ثم نعيد الربط
+ * (`bind`) فيُعيد الخادم ready مع الحالة والسجل الجديدين.
+ */
+async function reloadSessionAfterBranch(message) {
+  let ok = send({ type: "get_transcript" });
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  ok = send({ type: "bind", conversationId: getConversationId() }) && ok;
+  toast(message, ok ? "success" : "error");
+}
+
+async function treeFork(entryId) {
+  if (!entryId || treeView.loading) return;
+  if (state.current?.isStreaming) {
+    toast("لا يمكن التفريع أثناء التوليد — أوقف التوليد أولاً.", "error");
+    return;
+  }
+  treeView.loading = true;
+  renderTreeView();
+  try {
+    const data = await rpcCall("fork", { entryId }, { timeoutMs: 60_000 });
+    if (data?.cancelled) {
+      toast("أُلغيت عملية التفريع بواسطة إضافة.", "error");
+      return;
+    }
+    closeTreeDialog();
+    await reloadSessionAfterBranch("🌿 تم التفريع من الرسالة المختارة — أنت الآن على الفرع الجديد.");
+  } catch (err) {
+    toast(`تعذّر التفريع: ${err?.message || err}`, "error");
+  } finally {
+    treeView.loading = false;
+    renderTreeView();
+  }
+}
+
+async function treeClone() {
+  if (treeView.loading) return;
+  if (state.current?.isStreaming) {
+    toast("لا يمكن إنشاء نسخة أثناء التوليد — أوقف التوليد أولاً.", "error");
+    return;
+  }
+  treeView.loading = true;
+  renderTreeView();
+  try {
+    const data = await rpcCall("clone", {}, { timeoutMs: 60_000 });
+    if (data?.cancelled) {
+      toast("أُلغيت عملية النسخ بواسطة إضافة.", "error");
+      return;
+    }
+    closeTreeDialog();
+    await reloadSessionAfterBranch("📄 تم إنشاء نسخة من الفرع الحالي.");
+  } catch (err) {
+    toast(`تعذّر إنشاء النسخة: ${err?.message || err}`, "error");
+  } finally {
+    treeView.loading = false;
+    renderTreeView();
+  }
+}
+
+/** اسم ملف التنزيل من عنوان الجلسة. */
+function sessionFileBase() {
+  const title = String(state.current?.title || activeTab()?.title || "session").trim();
+  const safe = title
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  return `${safe || "session"}-${stamp}`;
+}
+
+/**
+ * يقرأ نص ملف التصدير. لا يوجد مسار تنزيل مخصّص في الخادم، لكن ملفات public/
+ * تُخدم مباشرة — فننسخ الملف مؤقتاً إلى مجلد public للخادم ثم نحذفه فوراً.
+ * المجلد يُكتشف من cwd عملية الخادم (بلا أي مسار مكتوب يدوياً).
+ */
+async function fetchExportedHtml(path) {
+  const name = `__export-${Date.now().toString(36)}.html`;
+  const script = [
+    "root=''",
+    'for pid in $(pgrep -f "src/index.js" 2>/dev/null); do cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null) || continue; if [ -d "$cwd/public" ]; then root="$cwd"; break; fi; done',
+    '[ -n "$root" ] || exit 3',
+    `cp ${JSON.stringify(path)} "$root/public/${name}"`,
+    `printf '%s' "$root/public/${name}"`,
+  ].join("; ");
+  const copy = await rpcCall("bash", { command: script, excludeFromContext: true }, { timeoutMs: 60_000 });
+  if (copy?.exitCode === 3) {
+    throw new Error(`لم أجد مجلد public للخادم — ملف التصدير جاهز على المسار: ${path}`);
+  }
+  const placed = String(copy?.output || "").trim();
+  if (copy?.exitCode !== 0 || !placed) {
+    throw new Error(`تعذّر تجهيز الملف للتنزيل — ملف التصدير على المسار: ${path}`);
+  }
+  try {
+    const res = await fetch(`/${name}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`تعذّر قراءة التصدير (HTTP ${res.status})`);
+    return await res.text();
+  } finally {
+    void rpcCall("bash", { command: `rm -f ${JSON.stringify(placed)}`, excludeFromContext: true }, { timeoutMs: 30_000 }).catch(
+      () => {},
+    );
+  }
+}
+
+async function treeExportHtml() {
+  const button = els.treeExport;
+  const previous = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "⏳ جارٍ التصدير…";
+  }
+  try {
+    const data = await rpcCall("export_html", {}, { timeoutMs: 120_000 });
+    const path = data?.path;
+    if (!path) throw new Error("لم يُرجع الخادم مسار ملف التصدير");
+    const html = await fetchExportedHtml(path);
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const name = `${sessionFileBase()}.html`;
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    toast(`⬇️ تم تنزيل التصدير: ${name}`, "success");
+  } catch (err) {
+    toast(`تعذّر التصدير: ${err?.message || err}`, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previous || "⬇️ تصدير HTML";
+    }
+  }
+}
+
+/** نسخ عبر تنفيذ مباشر — بديل عند حجب Clipboard API. */
+function copyTextFallback(text) {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.insetInlineStart = "-9999px";
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  return ok;
+}
+
+async function treeCopyLast() {
+  const button = els.treeCopyLast;
+  const previous = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "⏳ جارٍ النسخ…";
+  }
+  try {
+    const data = await rpcCall("get_last_assistant_text", {}, { timeoutMs: 30_000 });
+    const text = typeof data?.text === "string" ? data.text : "";
+    if (!text.trim()) {
+      toast("لا يوجد رد للمساعد لنسخه بعد.", "error");
+      return;
+    }
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      copied = copyTextFallback(text);
+    }
+    if (copied) toast("📋 نُسخ آخر رد للمساعد إلى الحافظة.", "success");
+    else toast("تعذّر النسخ — تحقّق من إذن الحافظة في المتصفح.", "error");
+  } catch (err) {
+    toast(`تعذّر جلب آخر رد: ${err?.message || err}`, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previous || "📋 نسخ آخر رد";
+    }
+  }
+}
+
+/** أحداث الشجرة (تفويض واحد على جسم النافذة). */
+function onTreeBodyClick(event) {
+  if (event.target.closest("[data-tree-retry]")) {
+    void loadTree();
+    return;
+  }
+  const toggle = event.target.closest("[data-tree-toggle]");
+  if (toggle) {
+    const id = toggle.dataset.treeToggle;
+    if (id) {
+      if (treeView.collapsed.has(id)) treeView.collapsed.delete(id);
+      else treeView.collapsed.add(id);
+      renderTreeView();
+    }
+    return;
+  }
+  const fork = event.target.closest("[data-tree-fork]");
+  if (fork) {
+    void treeFork(fork.dataset.treeFork);
+  }
+}
+
+/* ========================================================================
  * B3: لوحة أوامر /
  * محلية: /model /thinking /new /compact /stop /approvals
  * خادمية: get_commands (أوامر إضافات + مهارات /skill:name + قوالب)
@@ -4235,7 +4645,18 @@ function bindUi() {
   });
 
   els.statusBtn.addEventListener("click", showStatus);
-  els.statusClose.addEventListener("click", () => els.statusModal.classList.add("hidden"));
+
+  /* B4b + B5: نافذة شجرة الجلسة (تفريع/نسخة/تصدير/نسخ آخر رد) */
+  els.treeBtn?.addEventListener("click", openTreeDialog);
+  els.treeClose?.addEventListener("click", closeTreeDialog);
+  els.treeRefresh?.addEventListener("click", () => void loadTree());
+  els.treeClone?.addEventListener("click", () => void treeClone());
+  els.treeExport?.addEventListener("click", () => void treeExportHtml());
+  els.treeCopyLast?.addEventListener("click", () => void treeCopyLast());
+  els.treeBody?.addEventListener("click", onTreeBodyClick);
+  els.treeDialog?.addEventListener("click", (event) => {
+    if (event.target === els.treeDialog) closeTreeDialog();
+  });  els.statusClose.addEventListener("click", () => els.statusModal.classList.add("hidden"));
   els.statusModal.addEventListener("click", (e) => {
     if (e.target === els.statusModal) els.statusModal.classList.add("hidden");
   });
