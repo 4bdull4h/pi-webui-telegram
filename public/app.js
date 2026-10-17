@@ -1450,10 +1450,75 @@ function showStatus() {
   els.statusModal.classList.remove("hidden");
 }
 
+/* ===== B7: طابور الرسائل (steer / followUp) ===== */
+
+const QUEUE_MODE_KEY = "piweb.queue.mode";
+
+function queueMode() {
+  try {
+    return localStorage.getItem(QUEUE_MODE_KEY) === "followUp" ? "followUp" : "steer";
+  } catch {
+    return "steer";
+  }
+}
+
+function setQueueMode(mode) {
+  try {
+    localStorage.setItem(QUEUE_MODE_KEY, mode === "followUp" ? "followUp" : "steer");
+  } catch {
+    /* تجاهل */
+  }
+  renderQueueBar(state.queue);
+}
+
+/** يعرض شريط الطابور أعلى المحرر: العناصر المعلّقة + اختيار السلوك + إفراغ. */
+function renderQueueBar(queue) {
+  if (queue) state.queue = queue;
+  let bar = document.getElementById("queueBar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "queueBar";
+    bar.className = "queue-bar hidden";
+    const composer = document.querySelector(".composer") || document.querySelector(".composer-inner");
+    composer?.prepend(bar);
+  }
+  const items = [...(state.queue?.steeringItems || []), ...(state.queue?.followUpItems || [])];
+  if (!items.length) {
+    bar.classList.add("hidden");
+    bar.innerHTML = "";
+    return;
+  }
+  const mode = queueMode();
+  bar.classList.remove("hidden");
+  bar.innerHTML =
+    `<div class="qb-head"><span class="qb-title">📨 في الطابور (${items.length})</span>` +
+    `<div class="qb-mode" role="group" aria-label="سلوك الرسالة أثناء العمل">` +
+    `<button type="button" data-qm="steer" class="${mode === "steer" ? "active" : ""}" title="تُسلَّم بعد انتهاء دور المساعد الحالي">توجيه</button>` +
+    `<button type="button" data-qm="followUp" class="${mode === "followUp" ? "active" : ""}" title="تُسلَّم بعد انتهاء المهمة كاملة">متابعة</button>` +
+    `</div>` +
+    `<button type="button" class="qb-clear" data-qclear="1" title="إفراغ الطابور">✕</button></div>` +
+    `<div class="qb-items">${items
+      .map((t) => `<span class="qb-item">${escapeHtml(String(t).slice(0, 90))}</span>`)
+      .join("")}</div>`;
+  bar.onclick = (ev) => {
+    const btn = ev.target.closest("[data-qm],[data-qclear]");
+    if (!btn) return;
+    if (btn.dataset.qm) return setQueueMode(btn.dataset.qm);
+    if (btn.dataset.qclear) {
+      rpcCall("clear_queue", {}, { timeoutMs: 15000 })
+        .then(() => renderQueueBar({ steeringItems: [], followUpItems: [] }))
+        .catch(() => undefined);
+    }
+  };
+}
+
 /* ===== أحداث الخادم ===== */
 
 function handleConversationEvent(event) {
   switch (event.type) {
+    case "queue":
+      renderQueueBar(event);
+      break;
     case "user_message":
       addUserMessage(event.text, event.source || "web");
       setStreaming(true);
@@ -4157,7 +4222,7 @@ function submitPrompt() {
   }
 
   if (!items.length) {
-    if (!send({ type: "prompt", text })) return;
+    if (!send({ type: "prompt", text, mode: queueMode() })) return;
     els.input.value = "";
     saveActiveDraft();
     persistTabs();
@@ -4336,7 +4401,7 @@ async function submitWithAttachments(text, items) {
         images.push({ data: await readBase64(item.file), mimeType: file.mime });
       }
     }
-    const message = { type: "prompt", text };
+    const message = { type: "prompt", text, mode: queueMode() };
     if (images.length) message.images = images;
     if (attachments.length) message.attachments = attachments;
     if (!send(message)) return;

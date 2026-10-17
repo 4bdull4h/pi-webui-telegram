@@ -4516,3 +4516,42 @@ html[data-theme="light"] .tree-dialog::backdrop {
     transform: none !important;
   }
 }
+
+/* ===== B7: شريط طابور الرسائل ===== */
+.queue-bar {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a3350);
+  border-radius: 12px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  font-size: 12.5px;
+}
+.queue-bar.hidden { display: none; }
+.qb-head { display: flex; align-items: center; gap: 8px; }
+.qb-title { font-weight: 600; opacity: 0.9; }
+.qb-mode { display: inline-flex; margin-inline-start: auto; gap: 4px; }
+.qb-mode button {
+  border: 1px solid var(--border, #2a3350);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 2px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.qb-mode button.active { background: var(--accent-soft, rgba(120, 160, 255, 0.18)); border-color: var(--accent, #78a0ff); opacity: 1; }
+.qb-clear { border: 0; background: transparent; color: inherit; cursor: pointer; opacity: 0.6; font-size: 14px; }
+.qb-clear:hover { opacity: 1; }
+.qb-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.qb-item {
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.14);
+  opacity: 0.9;
+}
+@media (prefers-reduced-motion: reduce) { .queue-bar * { transition: none !important; } }

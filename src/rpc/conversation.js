@@ -379,8 +379,9 @@ export class RpcConversation {
     this.#emit({ type: "user_message", text: String(text), source, timestamp: Date.now() });
 
     if (this.isBusy) {
+      const steered = options.mode === "steer";
       const data = await client.send({
-        type: "follow_up",
+        type: steered ? "steer" : "follow_up",
         message: String(text),
         ...(images ? { images } : {}),
       });

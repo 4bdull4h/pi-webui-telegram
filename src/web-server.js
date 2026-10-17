@@ -967,6 +967,7 @@ export class WebServer {
             if (!composed) break;
             await conversation.prompt(composed.text, {
               source: "web",
+              mode: msg.mode === "followUp" ? "followUp" : "steer",
               images: composed.images.length ? composed.images : undefined,
             });
             break;
