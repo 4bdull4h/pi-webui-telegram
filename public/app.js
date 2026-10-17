@@ -24,6 +24,11 @@ const els = {
   input: $("#input"),
   sendBtn: $("#sendBtn"),
   stopBtn: $("#stopBtn"),
+  attachBtn: $("#attachBtn"),
+  fileInput: $("#fileInput"),
+  attachChips: $("#attachChips"),
+  pathMenu: $("#pathMenu"),
+  dropOverlay: $("#dropOverlay"),
   composerHint: $("#composerHint"),
   conn: $("#conn"),
   themeBtn: $("#themeBtn"),
@@ -117,6 +122,9 @@ const state = {
     widgets: new Map(),
     collapsedWidgets: new Set(),
   },
+  // B2: مرفقات (رفع + معاينة) وقائمة إكمال المسارات (@).
+  attachments: { items: [], seq: 0, uploading: false },
+  paths: { open: false, items: [], index: 0, start: 0, end: 0, request: 0, timer: null },
 };
 
 /* ===== أدوات مساعدة ===== */
@@ -1475,13 +1483,353 @@ function send(message) {
   return true;
 }
 
+let submitting = false;
+
 function submitPrompt() {
   const text = els.input.value.trim();
-  if (!text) return;
-  if (!send({ type: "prompt", text })) return;
-  els.input.value = "";
+  const items = [...state.attachments.items];
+  if (submitting || (!text && !items.length)) return;
+  if (!items.length) {
+    if (!send({ type: "prompt", text })) return;
+    els.input.value = "";
+    closePathMenu();
+    autoResize();
+    setStreaming(true);
+    return;
+  }
+  void submitWithAttachments(text, items);
+}
+
+/* ===== B2: المرفقات (رفع ثم إرسال) ===== */
+
+const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
+const MAX_ATTACHMENTS = 20;
+
+function humanSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} بايت`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} كB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} مB`;
+}
+
+function apiUrl(path) {
+  const token = getToken();
+  if (!token) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
+function fileKind(file) {
+  return IMAGE_MIMES.has(String(file?.type || "").toLowerCase()) ? "image" : "file";
+}
+
+function addFiles(list) {
+  const incoming = Array.from(list || []);
+  if (!incoming.length) return;
+  let total = state.attachments.items.reduce((sum, item) => sum + item.size, 0);
+  for (const file of incoming) {
+    if (!file || !file.size) continue;
+    if (state.attachments.items.length >= MAX_ATTACHMENTS) {
+      toast(`الحد الأقصى ${MAX_ATTACHMENTS} مرفقاً`, "error");
+      break;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      toast(`الملف «${file.name}» أكبر من 25MB`, "error");
+      continue;
+    }
+    if (total + file.size > MAX_TOTAL_BYTES) {
+      toast("مجموع حجم المرفقات يتجاوز 40MB", "error");
+      break;
+    }
+    total += file.size;
+    const kind = fileKind(file);
+    state.attachments.items.push({
+      id: ++state.attachments.seq,
+      file,
+      name: file.name || (kind === "image" ? "صورة" : "ملف"),
+      size: file.size,
+      mime: String(file.type || ""),
+      kind,
+      preview: kind === "image" ? URL.createObjectURL(file) : null,
+    });
+  }
+  renderAttachments();
   autoResize();
-  setStreaming(true);
+}
+
+function renderAttachments() {
+  const box = els.attachChips;
+  if (!box) return;
+  const items = state.attachments.items;
+  box.classList.toggle("hidden", items.length === 0);
+  els.attachBtn?.classList.toggle("has-items", items.length > 0);
+  box.replaceChildren();
+  for (const item of items) {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    chip.dataset.id = String(item.id);
+    chip.title = `${item.name} · ${humanSize(item.size)}`;
+    if (item.preview) {
+      const img = document.createElement("img");
+      img.className = "attach-thumb";
+      img.src = item.preview;
+      img.alt = item.name;
+      chip.appendChild(img);
+    } else {
+      const ico = document.createElement("span");
+      ico.className = "attach-ico";
+      ico.textContent = "📄";
+      chip.appendChild(ico);
+    }
+    const meta = document.createElement("span");
+    meta.className = "attach-meta";
+    const nameEl = document.createElement("b");
+    nameEl.dir = "auto";
+    nameEl.textContent = item.name;
+    const sizeEl = document.createElement("i");
+    sizeEl.textContent = humanSize(item.size);
+    meta.append(nameEl, sizeEl);
+    chip.appendChild(meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attach-remove";
+    remove.title = "إزالة";
+    remove.setAttribute("aria-label", `إزالة ${item.name}`);
+    remove.textContent = "✕";
+    remove.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeAttachment(item.id);
+    });
+    chip.appendChild(remove);
+    box.appendChild(chip);
+  }
+}
+
+function removeAttachment(id) {
+  const index = state.attachments.items.findIndex((item) => item.id === id);
+  if (index === -1) return;
+  const [item] = state.attachments.items.splice(index, 1);
+  if (item?.preview) URL.revokeObjectURL(item.preview);
+  renderAttachments();
+}
+
+function clearAttachments() {
+  for (const item of state.attachments.items) {
+    if (item.preview) URL.revokeObjectURL(item.preview);
+  }
+  state.attachments.items = [];
+  renderAttachments();
+}
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error("تعذّر قراءة الملف"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadFiles(items) {
+  const form = new FormData();
+  for (const item of items) form.append("files", item.file, item.name);
+  const res = await fetch(apiUrl("/api/upload"), { method: "POST", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || `تعذّر رفع المرفقات (${res.status})`);
+  return Array.isArray(data.files) ? data.files : [];
+}
+
+async function submitWithAttachments(text, items) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    toast("غير متصل بالخادم", "error");
+    return;
+  }
+  submitting = true;
+  state.attachments.uploading = true;
+  els.sendBtn.disabled = true;
+  els.composerHint.textContent = "⏳ جارٍ رفع المرفقات…";
+  try {
+    const uploaded = await uploadFiles(items);
+    const images = [];
+    const attachments = [];
+    for (let index = 0; index < uploaded.length; index += 1) {
+      const file = uploaded[index];
+      const item = items[index];
+      attachments.push({ path: file.path, name: file.name, mime: file.mime || item?.mime || "" });
+      if (file.kind === "image" && item?.file) {
+        images.push({ data: await readBase64(item.file), mimeType: file.mime });
+      }
+    }
+    const message = { type: "prompt", text };
+    if (images.length) message.images = images;
+    if (attachments.length) message.attachments = attachments;
+    if (!send(message)) return;
+    els.input.value = "";
+    closePathMenu();
+    clearAttachments();
+    autoResize();
+    setStreaming(true);
+  } catch (err) {
+    toast(err?.message || "تعذّر رفع المرفقات", "error");
+  } finally {
+    submitting = false;
+    state.attachments.uploading = false;
+    els.sendBtn.disabled = false;
+    if (!state.streaming) setStreaming(false);
+  }
+}
+
+/* ===== B2: إكمال المسارات بـ @ ===== */
+
+function fileIcon(name) {
+  const ext = String(name || "").split(".").pop().toLowerCase();
+  if (["png", "jpg", "jpeg", "webp", "gif", "svg"].includes(ext)) return "🖼️";
+  if (["js", "mjs", "ts", "tsx", "jsx", "py", "rs", "go", "sh"].includes(ext)) return "⌨️";
+  if (["json", "yaml", "yml", "toml", "env"].includes(ext)) return "⚙️";
+  if (["md", "txt", "log", "csv"].includes(ext)) return "📃";
+  return "📄";
+}
+
+function closePathMenu() {
+  state.paths.open = false;
+  state.paths.items = [];
+  state.paths.index = 0;
+  // إبطال أي رد قادم من طلب إكمال سابق حتى لا يُعيد فتح القائمة.
+  state.paths.request += 1;
+  if (state.paths.timer) {
+    clearTimeout(state.paths.timer);
+    state.paths.timer = null;
+  }
+  if (els.pathMenu) {
+    els.pathMenu.classList.add("hidden");
+    els.pathMenu.replaceChildren();
+  }
+}
+
+function tokenAtCaret() {
+  const el = els.input;
+  if (!el) return null;
+  const caret = el.selectionStart ?? el.value.length;
+  const before = el.value.slice(0, caret);
+  const match = /(^|[\s(\[{])@([^\s@]*)$/.exec(before);
+  if (!match) return null;
+  const query = match[2];
+  return { start: caret - query.length - 1, end: caret, query };
+}
+
+function updatePathCompletion() {
+  const token = tokenAtCaret();
+  if (!token) {
+    closePathMenu();
+    return;
+  }
+  if (state.paths.timer) clearTimeout(state.paths.timer);
+  const requestId = ++state.paths.request;
+  state.paths.timer = setTimeout(async () => {
+    state.paths.timer = null;
+    try {
+      const res = await fetch(apiUrl(`/api/files?q=${encodeURIComponent(token.query)}&limit=20`));
+      const data = await res.json().catch(() => ({}));
+      if (requestId !== state.paths.request) return;
+      const items = Array.isArray(data.items) ? data.items : [];
+      if (!items.length) {
+        closePathMenu();
+        return;
+      }
+      state.paths.open = true;
+      state.paths.items = items;
+      state.paths.index = 0;
+      state.paths.start = token.start;
+      state.paths.end = token.end;
+      renderPathMenu();
+    } catch {
+      closePathMenu();
+    }
+  }, 120);
+}
+
+function renderPathMenu() {
+  const box = els.pathMenu;
+  if (!box) return;
+  box.replaceChildren();
+  state.paths.items.forEach((item, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `path-item${index === state.paths.index ? " active" : ""}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", index === state.paths.index ? "true" : "false");
+    const ico = document.createElement("span");
+    ico.className = "path-ico";
+    ico.textContent = item.type === "dir" ? "📁" : fileIcon(item.name);
+    const label = document.createElement("span");
+    label.className = "path-name";
+    label.dir = "auto";
+    label.textContent = item.path;
+    row.append(ico, label);
+    row.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      insertPath(index);
+    });
+    box.appendChild(row);
+  });
+  box.classList.remove("hidden");
+  box.children[state.paths.index]?.scrollIntoView?.({ block: "nearest" });
+}
+
+function movePathSelection(delta) {
+  const total = state.paths.items.length;
+  if (!total) return;
+  state.paths.index = (state.paths.index + delta + total) % total;
+  renderPathMenu();
+}
+
+function insertPath(index) {
+  const item = state.paths.items[index ?? state.paths.index];
+  if (!item) return;
+  const el = els.input;
+  const start = state.paths.start;
+  const end = state.paths.end;
+  const isDir = item.type === "dir";
+  const insertion = `@${item.path}${isDir ? "" : " "}`;
+  el.value = el.value.slice(0, start) + insertion + el.value.slice(end);
+  const caret = start + insertion.length;
+  el.focus();
+  el.setSelectionRange(caret, caret);
+  autoResize();
+  if (isDir) updatePathCompletion();
+  else closePathMenu();
+}
+
+function handlePathKey(event) {
+  if (!state.paths.open) return false;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    movePathSelection(1);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    movePathSelection(-1);
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    event.preventDefault();
+    insertPath();
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closePathMenu();
+    return true;
+  }
+  return false;
 }
 
 /* ===== تفاعلات الواجهة ===== */
@@ -1494,12 +1842,72 @@ function autoResize() {
 function bindUi() {
   els.sendBtn.addEventListener("click", submitPrompt);
   els.stopBtn.addEventListener("click", () => send({ type: "abort" }));
-  els.input.addEventListener("input", autoResize);
+  els.input.addEventListener("input", () => {
+    autoResize();
+    updatePathCompletion();
+  });
   els.input.addEventListener("keydown", (e) => {
+    if (handlePathKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submitPrompt();
     }
+  });
+  els.input.addEventListener("blur", () => {
+    // إغلاق القائمة بعد فوات حدث النقر (mousedown يمنع فقد التركيز أصلاً).
+    setTimeout(() => closePathMenu(), 120);
+  });
+
+  // B2: الإرفاق (زر + سحب وإفلات + لصق صورة)
+  els.attachBtn?.addEventListener("click", () => els.fileInput?.click());
+  els.fileInput?.addEventListener("change", () => {
+    addFiles(els.fileInput.files);
+    els.fileInput.value = "";
+  });
+  els.input.addEventListener("paste", (event) => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    const files = [];
+    for (const item of items) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    if (!files.length) return;
+    event.preventDefault();
+    addFiles(files);
+  });
+
+  let dragDepth = 0;
+  const showDrop = (on) => els.dropOverlay?.classList.toggle("hidden", !on);
+  const hasFiles = (event) => Array.from(event.dataTransfer?.types || []).includes("Files");
+  document.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    showDrop(true);
+  });
+  document.addEventListener("dragover", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  });
+  document.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) showDrop(false);
+  });
+  document.addEventListener("drop", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    showDrop(false);
+    addFiles(event.dataTransfer?.files);
+    els.input?.focus();
+  });
+  document.addEventListener("mousedown", (event) => {
+    if (!state.paths.open) return;
+    if (els.pathMenu?.contains(event.target) || els.input?.contains(event.target)) return;
+    closePathMenu();
   });
 
   els.newSessionBtn.addEventListener("click", () => {

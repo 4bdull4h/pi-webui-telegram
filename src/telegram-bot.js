@@ -139,6 +139,11 @@ export class TelegramBot {
       lastRenderAt: 0,
     };
     this.primaryChatId = config.telegram.allowedChats[0] || config.telegram.allowedUsers[0] || null;
+    // C1: حوارات الامتدادات المعلّقة على رد المستخدم (موافقة الأدوات وغيرها).
+    // requestId → { requestId, chatId, messageId, conv, method, header, options, timer }
+    this.pendingUI = new Map();
+    // chatId → نفس الكائن أعلاه (لحوارات input/editor التي تنتظر رسالة نصية).
+    this.pendingInput = new Map();
   }
 
   get enabled() {
@@ -185,7 +190,7 @@ export class TelegramBot {
     this.sharedUnsubscribe?.();
     const conversation = this.manager.getOrCreate(config.sharedSessionId);
     this.sharedUnsubscribe = conversation.subscribe((event) => {
-      this.handleSharedEvent(event).catch((err) =>
+      this.handleSharedEvent(event, conversation).catch((err) =>
         logger.warn("تيليجرام مزامنة:", err?.message || err),
       );
     });
@@ -340,8 +345,10 @@ export class TelegramBot {
     this.mirror.dirty = false;
   }
 
-  async handleSharedEvent(event) {
+  async handleSharedEvent(event, conversation = null) {
     if (!config.syncWebTelegram || !config.sharedSessionId) return;
+    // C1: حوارات الامتدادات (موافقة الأدوات) لا تُكتَم أبداً — قبل منطق الكتم.
+    if (event?.type === "extension_ui") return this.handleExtensionUi(event, conversation);
     // D1: وضعا final/compact يمرّان على المسار المكتوم، وlive يبقى كما هو.
     if (this.quietMode) return this.handleQuietEvent(event);
     const target = this.mirrorTargetChat();
@@ -721,6 +728,291 @@ export class TelegramBot {
     this.resetQuiet();
   }
 
+  // ===== C1: حوارات الامتدادات (موافقة الأدوات وغيرها) =====
+
+  /** ترويسة HTML موحّدة لحوار امتداد (title + message). */
+  #uiHeader(event) {
+    const parts = [];
+    if (event.title) parts.push(escapeHtml(String(event.title)));
+    if (event.message) parts.push(escapeHtml(String(event.message)));
+    return parts.join("\n\n");
+  }
+
+  #newPending(event, conversation, chatId, header) {
+    const entry = {
+      requestId: event.requestId,
+      chatId: chatId ? String(chatId) : null,
+      messageId: null,
+      conv: conversation,
+      method: event.method,
+      header: header || "",
+      options: [],
+      timer: null,
+    };
+    this.pendingUI.set(event.requestId, entry);
+    return entry;
+  }
+
+  /** إزالة حوار معلّق من الخرائط وإيقاف مؤقته. */
+  #clearPending(entry) {
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.timer = null;
+    if (this.pendingUI.get(entry.requestId) === entry) this.pendingUI.delete(entry.requestId);
+    const key = entry.chatId ? String(entry.chatId) : null;
+    if (key && this.pendingInput.get(key) === entry) this.pendingInput.delete(key);
+  }
+
+  /** إلغاء كل الحوارات المعلّقة (يُنبَّه الخادم كي لا تتعلّق الأداة). */
+  cancelPendingDialogs() {
+    const entries = [...this.pendingUI.values()];
+    for (const entry of entries) {
+      this.#clearPending(entry);
+      if (!entry.requestId) continue;
+      try {
+        Promise.resolve(entry.conv?.respondExtensionUI?.(entry.requestId, { cancelled: true })).catch(
+          () => undefined,
+        );
+      } catch {
+        /* تجاهل */
+      }
+    }
+    this.pendingUI.clear();
+    this.pendingInput.clear();
+  }
+
+  /** تسجيل مؤقت المهلة: يعدّل الرسالة ويمسح الأزرار دون رد إلى الخادم. */
+  #armTimeout(event, entry) {
+    const timeout = Number(event.timeout);
+    if (!Number.isFinite(timeout) || timeout <= 0) return;
+    entry.timer = setTimeout(() => {
+      this.#expireDialog(entry).catch(() => undefined);
+    }, Math.min(timeout, 24 * 60 * 60 * 1000));
+    entry.timer.unref?.();
+  }
+
+  async #expireDialog(entry) {
+    if (this.pendingUI.get(entry.requestId) !== entry) return;
+    this.#clearPending(entry);
+    if (!entry.chatId || !entry.messageId) return;
+    const text = truncateHtml(
+      `${entry.header}\n\n<i>${t(this.lang, "uiTimedOut")}</i>`,
+      config.telegram.maxMessageLength,
+    );
+    await this.api
+      .editMessageText(entry.chatId, entry.messageId, text, {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      })
+      .catch(() => undefined);
+  }
+
+  /** إرسال رسالة الحوار؛ عند الفشل يُلغى الطلب بدل تعليق الأداة. */
+  async #sendDialog(entry, text, keyboard) {
+    try {
+      const message = await this.api.sendMessage(entry.chatId, text, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        ...(keyboard ? { reply_markup: keyboard } : {}),
+      });
+      entry.messageId = message?.message_id ?? null;
+      return true;
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر إرسال حوار الامتداد:", err?.message || err);
+      this.#clearPending(entry);
+      try {
+        await Promise.resolve(
+          entry.conv?.respondExtensionUI?.(entry.requestId, { cancelled: true }),
+        );
+      } catch {
+        /* تجاهل */
+      }
+      return false;
+    }
+  }
+
+  /** حوار select: الترويسة + الخيارات + أزرار inline. */
+  async #askSelect(event, conversation, chatId) {
+    const options = (Array.isArray(event.options) ? event.options : []).map((opt) => String(opt));
+    const entry = this.#newPending(event, conversation, chatId, "");
+    if (!options.length) {
+      this.#clearPending(entry);
+      await Promise.resolve(
+        conversation?.respondExtensionUI?.(event.requestId, { cancelled: true }),
+      ).catch(() => undefined);
+      return;
+    }
+    entry.options = options;
+    const blocks = [this.#uiHeader(event)];
+    blocks.push(options.map((opt, i) => `${i + 1}. ${escapeHtml(opt)}`).join("\n"));
+    entry.header = truncateHtml(
+      blocks.filter(Boolean).join("\n\n"),
+      config.telegram.maxMessageLength,
+    );
+    const rows = options.map((opt, i) => [
+      { text: opt.length > 60 ? `${opt.slice(0, 57)}…` : opt, callback_data: `ui:${event.requestId}:${i}` },
+    ]);
+    entry.method = "select";
+    if (!(await this.#sendDialog(entry, entry.header, { inline_keyboard: rows }))) return;
+    this.#armTimeout(event, entry);
+  }
+
+  /** حوار confirm: زرّا نعم/لا. */
+  async #askConfirm(event, conversation, chatId) {
+    const entry = this.#newPending(event, conversation, chatId, "");
+    entry.header = truncateHtml(
+      this.#uiHeader(event) || t(this.lang, "uiConfirmTitle"),
+      config.telegram.maxMessageLength,
+    );
+    entry.method = "confirm";
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: t(this.lang, "uiYes"), callback_data: `ui:${event.requestId}:y` },
+          { text: t(this.lang, "uiNo"), callback_data: `ui:${event.requestId}:n` },
+        ],
+      ],
+    };
+    if (!(await this.#sendDialog(entry, entry.header, keyboard))) return;
+    this.#armTimeout(event, entry);
+  }
+
+  /** حوارا input/editor: ننتظر الرسالة النصية التالية من نفس المحادثة. */
+  async #askInput(event, conversation, chatId) {
+    const entry = this.#newPending(event, conversation, chatId, "");
+    entry.method = event.method;
+    const blocks = [this.#uiHeader(event)];
+    if (event.prefill) blocks.push(`<pre>${escapeHtml(String(event.prefill))}</pre>`);
+    blocks.push(`<i>${t(this.lang, "uiInputHint")}</i>`);
+    entry.header = truncateHtml(
+      blocks.filter(Boolean).join("\n\n"),
+      config.telegram.maxMessageLength,
+    );
+    this.pendingInput.set(String(chatId), entry);
+    if (!(await this.#sendDialog(entry, entry.header, null))) return;
+    this.#armTimeout(event, entry);
+  }
+
+  /** معالج حدث extension_ui القادم من المحادثة. */
+  async handleExtensionUi(event, conversation = null) {
+    const chatId = this.mirrorTargetChat();
+    const conv = conversation || (chatId ? this.#conversation(chatId) : null);
+
+    if (event.method === "notify") {
+      // في وضع final تمرّ إشعارات info فقط بصمت؛ غيرها يُرسل دائماً.
+      if (event.notifyType === "info" && this.notifyMode === "final") return;
+      if (!chatId) return;
+      const body = this.#uiHeader(event);
+      if (!body) return;
+      const icon =
+        event.notifyType === "error" ? "❌ " : event.notifyType === "warning" ? "⚠️ " : "ℹ️ ";
+      await this.api
+        .sendMessage(chatId, truncateHtml(`${icon}${body}`, config.telegram.maxMessageLength), {
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        })
+        .catch(() => undefined);
+      return;
+    }
+
+    // setStatus / setWidget / setTitle / set_editor_text: تُتجاهل بصمت.
+    if (!["select", "confirm", "input", "editor"].includes(event.method)) return;
+
+    // لا محادثة/لا هدف: ألغِ الطلب فوراً كي لا تتوقف الأداة 120 ثانية.
+    if (!chatId || !conv) {
+      try {
+        await Promise.resolve(conv?.respondExtensionUI?.(event.requestId, { cancelled: true }));
+      } catch {
+        /* تجاهل */
+      }
+      return;
+    }
+
+    switch (event.method) {
+      case "select":
+        return this.#askSelect(event, conv, chatId);
+      case "confirm":
+        return this.#askConfirm(event, conv, chatId);
+      case "input":
+      case "editor":
+        return this.#askInput(event, conv, chatId);
+      default:
+        return;
+    }
+  }
+
+  /** هل هذه الرسالة رد على حوار input/editor معلّق؟ */
+  async answerPendingInput(chatId, text) {
+    const entry = this.pendingInput.get(String(chatId));
+    if (!entry) return false;
+    this.#clearPending(entry);
+    const conv = entry.conv || this.#conversation(chatId);
+    try {
+      await conv.respondExtensionUI(entry.requestId, { value: text });
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر إرسال رد الحوار:", err?.message || err);
+    }
+    if (entry.messageId && entry.chatId) {
+      const suffix = text.length > 200 ? `${text.slice(0, 197)}…` : text;
+      const body = truncateHtml(
+        `${entry.header}\n\n<b>➡️ ${escapeHtml(suffix)}</b>`,
+        config.telegram.maxMessageLength,
+      );
+      await this.api
+        .editMessageText(entry.chatId, entry.messageId, body, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [] },
+        })
+        .catch(() => undefined);
+    }
+    return true;
+  }
+
+  /** أزرار حوارات الامتدادات (ui:<requestId>:<payload>). */
+  async handleUiCallback(query) {
+    const chatId = query.message?.chat?.id;
+    const messageId = query.message?.message_id;
+    const data = query.data || "";
+    const parts = data.split(":");
+    const requestId = parts[1];
+    const raw = parts.slice(2).join(":");
+    try {
+      const entry = this.pendingUI.get(requestId);
+      if (!entry) return; // نقر مكرّر أو حوار منتهٍ/منتهي المهلة.
+      const conv = entry.conv || (chatId ? this.#conversation(chatId) : null);
+      let payload;
+      let decision;
+      if (entry.method === "confirm") {
+        const confirmed = raw === "y";
+        payload = { confirmed };
+        decision = t(this.lang, confirmed ? "uiAllowed" : "uiRejected");
+      } else {
+        const index = Number.parseInt(raw, 10);
+        const choice = Number.isInteger(index) ? entry.options[index] : undefined;
+        if (choice === undefined) return;
+        payload = { value: choice };
+        decision = escapeHtml(choice);
+      }
+      this.#clearPending(entry);
+      await conv.respondExtensionUI(requestId, payload);
+      const targetChat = chatId ?? entry.chatId;
+      if (messageId && targetChat != null) {
+        const body = truncateHtml(
+          `${entry.header}\n\n<b>${decision}</b>`,
+          config.telegram.maxMessageLength,
+        );
+        await this.api
+          .editMessageText(targetChat, messageId, body, {
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [] },
+          })
+          .catch(() => undefined);
+      }
+    } finally {
+      await this.api.answerCallbackQuery(query.id).catch(() => undefined);
+    }
+  }
+
   #isAuthorized(update) {
     const from = update.message?.from || update.callback_query?.from;
     if (!from) return false;
@@ -766,6 +1058,8 @@ export class TelegramBot {
     this.clearMirrorFinalize();
     this.stopMirrorTyping();
     this.mirror.active = false;
+    // C1: تيليجرام بلا WS — نلغي الحوارات المعلّقة بأنفسنا عند الإيقاف.
+    this.cancelPendingDialogs();
     // D1: إيقاف مؤقتات الوضع المكتوم.
     if (this.quiet.timer) clearInterval(this.quiet.timer);
     if (this.quiet.renderTimer) clearTimeout(this.quiet.renderTimer);
@@ -846,8 +1140,11 @@ export class TelegramBot {
         return this.showSessions(chatId);
       case "/restart":
         return this.cmdRestart(chatId);
-      default:
+      default: {
+        // C1: رسالة نصية أثناء حوار input/editor = رد على الحوار، لا prompt جديد.
+        if (await this.answerPendingInput(chatId, text)) return;
         return this.promptChat(chatId, text);
+      }
     }
   }
 
@@ -1069,6 +1366,8 @@ export class TelegramBot {
     const chatId = query.message?.chat?.id;
     const messageId = query.message?.message_id;
     const data = query.data || "";
+    // C1: أزرار حوارات الامتدادات لها الأولوية على بقية الحالات.
+    if (data.startsWith("ui:")) return this.handleUiCallback(query);
     const [action, arg] = data.split(":");
     try {
       switch (action) {

@@ -16,6 +16,20 @@ import {
   McpManager,
   countPromptTemplates,
 } from "./control.js";
+import {
+  MAX_IMAGES,
+  MAX_TOTAL_BYTES,
+  MULTIPART_SLACK_BYTES,
+  UploadError,
+  isImageMime,
+  listWorkspacePaths,
+  normalizeAttachments,
+  normalizeImage,
+  parseMultipart,
+  resolveUploadFile,
+  saveUploads,
+  sniffImageMime,
+} from "./uploads.js";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -73,6 +87,44 @@ function safeJoin(root, target) {
   return resolved;
 }
 
+/** يقرأ الجسم الخام كـBuffer (للرفع الثنائي) بحد أقصى. */
+async function readRawBody(req, limit) {
+  return new Promise((resolvePromise, reject) => {
+    const chunks = [];
+    let size = 0;
+    let done = false;
+    const onData = (chunk) => {
+      if (done) return;
+      size += chunk.length;
+      if (size > limit) {
+        done = true;
+        req.off("data", onData);
+        // نتجاهل بقية الجسم بدل قطع الاتصال، حتى يصل رد 413 واضحاً للعميل.
+        req.resume();
+        reject(new UploadError(413, "حجم الطلب يتجاوز الحد المسموح (40MB للملفات)"));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    req.on("data", onData);
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolvePromise(Buffer.concat(chunks));
+    });
+    req.on("error", (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
+    req.on("aborted", () => {
+      if (done) return;
+      done = true;
+      reject(new UploadError(400, "انقطع رفع الملف"));
+    });
+  });
+}
+
 async function readBody(req, limit = 1_000_000) {
   return new Promise((resolvePromise, reject) => {
     let data = "";
@@ -93,6 +145,56 @@ async function readBody(req, limit = 1_000_000) {
     });
     req.on("error", reject);
   });
+}
+
+/** يبني نص/صور الطلب القادم من الواجهة مع التحقق من الأحجام والصيغ. */
+async function composeWebPrompt(msg) {
+  const rawText = typeof msg.text === "string" ? msg.text : msg.text == null ? "" : String(msg.text);
+  const rawImages = Array.isArray(msg.images) ? msg.images : [];
+  if (rawImages.length > MAX_IMAGES) {
+    throw new UploadError(400, `الحد الأقصى ${MAX_IMAGES} صور في الرسالة الواحدة`);
+  }
+
+  const images = [];
+  let total = 0;
+  for (const entry of rawImages) {
+    const image = normalizeImage(entry);
+    total += image.size;
+    if (total > MAX_TOTAL_BYTES) {
+      throw new UploadError(413, "مجموع حجم الصور يتجاوز الحد المسموح (40MB)");
+    }
+    images.push({ type: "image", data: image.data, mimeType: image.mimeType });
+  }
+
+  const attachments = await normalizeAttachments(msg.attachments);
+  const fileAttachments = attachments.filter((a) => !isImageMime(a.mime));
+  const imageAttachments = attachments.filter((a) => isImageMime(a.mime));
+
+  // عميل أرسل مسار صورة فقط (بلا base64): نحوّلها هنا حتى لا تضيع بصمت.
+  if (!images.length && imageAttachments.length) {
+    for (const attachment of imageAttachments.slice(0, MAX_IMAGES)) {
+      const buffer = await readFile(attachment.path).catch(() => null);
+      if (!buffer) continue;
+      const image = normalizeImage({
+        data: buffer.toString("base64"),
+        mimeType: sniffImageMime(buffer) || attachment.mime,
+      });
+      total += image.size;
+      if (total > MAX_TOTAL_BYTES) {
+        throw new UploadError(413, "مجموع حجم الصور يتجاوز الحد المسموح (40MB)");
+      }
+      images.push({ type: "image", data: image.data, mimeType: image.mimeType });
+    }
+  }
+
+  let text = rawText;
+  if (fileAttachments.length) {
+    const line = `📎 مرفقات: ${fileAttachments.map((a) => a.path).join(", ")}`;
+    text = text.trim() ? `${text.replace(/\s+$/, "")}\n\n${line}` : line;
+  }
+  if (!text.trim() && images.length) text = "🖼️ صورة مرفقة";
+  if (!text.trim() && !images.length) return null;
+  return { text, images };
 }
 
 export class WebServer {
@@ -201,6 +303,43 @@ export class WebServer {
 
       if (pathname === "/api/overview" && method === "GET") {
         return sendJson(res, 200, await this.overview());
+      }
+
+      // ===== B2: رفع الملفات وإكمال المسارات والمعاينة =====
+      if (pathname === "/api/upload" && method === "POST") {
+        const ctype = String(req.headers["content-type"] || "");
+        if (!/^multipart\/form-data/i.test(ctype)) {
+          throw new UploadError(415, "يجب إرسال الملفات بصيغة multipart/form-data");
+        }
+        const boundary =
+          /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ctype)?.slice(1).find(Boolean)?.trim() || "";
+        const raw = await readRawBody(req, MAX_TOTAL_BYTES + MULTIPART_SLACK_BYTES);
+        const files = await saveUploads(parseMultipart(raw, boundary), { token: config.web.token });
+        if (!files.length) throw new UploadError(400, "لم يتم إرسال أي ملف");
+        return sendJson(res, 200, { ok: true, files });
+      }
+
+      if (pathname === "/api/files" && method === "GET") {
+        const items = await listWorkspacePaths(url.searchParams.get("q") || "", {
+          limit: url.searchParams.get("limit"),
+        });
+        return sendJson(res, 200, { ok: true, items });
+      }
+
+      const previewMatch = /^\/files\/(.+)$/.exec(pathname);
+      if (previewMatch) {
+        // المعاينة تعرض ملفات مرفوعة: نحميها بنفس رمز الواجهة إن كان مفعّلاً.
+        if (!this.#tokenOk(url)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
+        if (method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+        const found = await resolveUploadFile(previewMatch[1]);
+        if (!found) return sendJson(res, 404, { ok: false, error: "الملف غير موجود" });
+        res.writeHead(200, {
+          "content-type": found.mime,
+          "content-length": found.data.length,
+          "cache-control": "private, max-age=86400",
+          "x-content-type-options": "nosniff",
+        });
+        return res.end(found.data);
       }
 
       if (pathname === "/api/config") {
@@ -403,8 +542,10 @@ export class WebServer {
       return this.serveFile(res, filePath);
     } catch (err) {
       const message = err?.message || String(err);
-      logger.warn("ويب: خطأ في الطلب:", message);
-      sendJson(res, 400, { error: message });
+      const status = Number.isInteger(err?.status) ? err.status : 400;
+      if (status >= 500) logger.warn("ويب: خطأ في الطلب:", message);
+      else logger.debug("ويب: طلب مرفوض:", message);
+      sendJson(res, status, { ok: false, error: message });
     }
   }
 
@@ -592,8 +733,12 @@ export class WebServer {
       try {
         switch (msg.type) {
           case "prompt": {
-            if (!msg.text || !String(msg.text).trim()) break;
-            await conversation.prompt(String(msg.text), { source: "web" });
+            const composed = await composeWebPrompt(msg);
+            if (!composed) break;
+            await conversation.prompt(composed.text, {
+              source: "web",
+              images: composed.images.length ? composed.images : undefined,
+            });
             break;
           }
           case "abort":

@@ -249,6 +249,8 @@ class Conversation {
     const source = ["web", "telegram", "api", "system"].includes(options.source)
       ? options.source
       : "web";
+    const images =
+      Array.isArray(options.images) && options.images.length ? options.images : undefined;
     this.#emit({
       type: "user_message",
       text: String(text),
@@ -256,12 +258,12 @@ class Conversation {
       timestamp: Date.now(),
     });
     if (session.isStreaming) {
-      const disposition = await session.followUp(text);
+      const disposition = await session.followUp(text, images);
       return disposition;
     }
     this.#emit({ type: "run_start" });
     try {
-      await session.prompt(text);
+      await session.prompt(text, images ? { images } : undefined);
     } catch (err) {
       this.#emit({ type: "error", message: err?.message || String(err) });
       throw err;

@@ -93,6 +93,14 @@ const STRINGS = {
     btnThink: "🧠 التفكير",
     btnSessions: "🗂️ الجلسات",
     btnHelp: "📚 مساعدة",
+    // ===== C1: حوارات الامتدادات (موافقة الأدوات) =====
+    uiYes: "✅ نعم",
+    uiNo: "⛔️ لا",
+    uiConfirmTitle: "تأكيد",
+    uiAllowed: "✅ سُمح",
+    uiRejected: "⛔️ رُفض",
+    uiTimedOut: "⌛️ انتهت المهلة",
+    uiInputHint: "✍️ أرسل ردك الآن في رسالة.",
   },
   en: {
     dir: "ltr",
@@ -183,6 +191,14 @@ const STRINGS = {
     btnThink: "🧠 Thinking",
     btnSessions: "🗂️ Sessions",
     btnHelp: "📚 Help",
+    // ===== C1: extension dialogs (tool approvals) =====
+    uiYes: "✅ Yes",
+    uiNo: "⛔️ No",
+    uiConfirmTitle: "Confirm",
+    uiAllowed: "✅ Allowed",
+    uiRejected: "⛔️ Denied",
+    uiTimedOut: "⌛️ Timed out",
+    uiInputHint: "✍️ Send your answer as a message.",
   },
 };
 

@@ -375,10 +375,15 @@ export class RpcConversation {
       this.#save();
     }
     const source = SOURCES.includes(options.source) ? options.source : "web";
+    const images = Array.isArray(options.images) && options.images.length ? options.images : undefined;
     this.#emit({ type: "user_message", text: String(text), source, timestamp: Date.now() });
 
     if (this.isBusy) {
-      const data = await client.send({ type: "follow_up", message: String(text) });
+      const data = await client.send({
+        type: "follow_up",
+        message: String(text),
+        ...(images ? { images } : {}),
+      });
       return data?.disposition || "queued";
     }
 
@@ -388,7 +393,11 @@ export class RpcConversation {
     this.remote.isStreaming = true;
     try {
       const data = await client.send(
-        { type: "prompt", message: String(text) },
+        {
+          type: "prompt",
+          message: String(text),
+          ...(images ? { images } : {}),
+        },
         { timeoutMs: PROMPT_TIMEOUT_MS },
       );
       if (data?.disposition === "handled") {
