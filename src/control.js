@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import os from "node:os";
+import { spawn } from "node:child_process";
 
 import config from "./config.js";
 import logger from "./logger.js";
@@ -564,6 +565,13 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** مفتاح تاريخ محلي (YYYY-MM-DD) — لا تستخدم toISOString لأنه يحوّل إلى UTC ويُزيح اليوم. */
+function localDateKey(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export class UsageTracker {
   constructor(file) {
     this.file = file;
@@ -717,12 +725,16 @@ export class UsageTracker {
     const decorate = (agg, tokenLimit, costLimit, resetAt) => {
       const remainingTokens = tokenLimit > 0 ? Math.max(0, tokenLimit - agg.tokens) : null;
       const remainingCost = costLimit > 0 ? Math.max(0, costLimit - agg.cost) : null;
+      const freshTokens = agg.input + agg.output + agg.cacheWrite;
       return {
         ...agg,
         tokenLimit,
         costLimit,
         remainingTokens,
         remainingCost,
+        freshTokens,
+        cacheReadTokens: agg.cacheRead,
+        ratioTokens: tokenLimit > 0 ? agg.tokens / tokenLimit : null,
         percentTokens: tokenLimit > 0 ? Math.min(100, (agg.tokens / tokenLimit) * 100) : null,
         percentCost: costLimit > 0 ? Math.min(100, (agg.cost / costLimit) * 100) : null,
         resetAt,
@@ -746,7 +758,7 @@ export class UsageTracker {
         requests++;
       }
       series.push({
-        date: new Date(from).toISOString().slice(0, 10),
+        date: localDateKey(from),
         tokens,
         cost,
         requests,
@@ -1178,6 +1190,11 @@ export class McpManager {
   constructor() {
     this.userPath = join(config.agentDir, "mcp.json");
     this.projectPath = join(config.workspace, ".pi", "mcp.json");
+    this.statuses = new Map();
+  }
+
+  #statusKey(name, scope) {
+    return `${scope}:${name}`;
   }
 
   #read(path) {
@@ -1188,6 +1205,8 @@ export class McpManager {
 
   #describeServer(name, config, scope) {
     const safe = config && typeof config === "object" ? config : {};
+    const enabled = safe.enabled !== false;
+    const saved = this.statuses.get(this.#statusKey(name, scope));
     return {
       name,
       scope,
@@ -1195,12 +1214,16 @@ export class McpManager {
       command: safe.command || "",
       args: Array.isArray(safe.args) ? safe.args.map((arg) => (looksLikeSecret(arg) ? "••••" : String(arg))) : [],
       url: safe.url || "",
-      enabled: safe.enabled !== false,
+      enabled,
       exposure: safe.exposure || "codemode",
       description: safe.description || "",
       envKeys: Object.keys(safe.env || {}),
       headerKeys: Object.keys(safe.headers || {}),
       hasOAuth: !!safe.oauth,
+      status: enabled ? saved?.status || "unknown" : "disabled",
+      statusText: enabled ? saved?.statusText || "لم يُفحص بعد" : "الخادم معطّل",
+      checkedAt: saved?.checkedAt || null,
+      latencyMs: saved?.latencyMs ?? null,
     };
   }
 
@@ -1234,6 +1257,144 @@ export class McpManager {
     if (!server) throw new Error(`خادم MCP غير موجود: ${name}`);
     server.enabled = !!enabled;
     writeJson(path, data, 0o600);
+    this.statuses.delete(this.#statusKey(name, scope));
+    return this.list();
+  }
+
+  #find(name, scope = "user") {
+    const path = scope === "project" ? this.projectPath : this.userPath;
+    const data = this.#read(path);
+    const server = data.mcpServers?.[name];
+    if (!server) throw new Error(`خادم MCP غير موجود: ${name}`);
+    return { server, scope, name };
+  }
+
+  #saveStatus(name, scope, result) {
+    this.statuses.set(this.#statusKey(name, scope), {
+      status: result.status,
+      statusText: result.statusText,
+      checkedAt: new Date().toISOString(),
+      latencyMs: result.latencyMs ?? null,
+    });
+    return this.list();
+  }
+
+  async #diagnoseHttp(server) {
+    let url;
+    try {
+      url = new URL(String(server.url || ""));
+    } catch {
+      return { status: "disconnected", statusText: "عنوان MCP غير صالح" };
+    }
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return { status: "disconnected", statusText: "النقل غير مدعوم للفحص" };
+    }
+    const headers = { Accept: "application/json, text/event-stream", "Content-Type": "application/json" };
+    for (const [key, value] of Object.entries(server.headers || {})) {
+      if (typeof value === "string" && value.trim()) headers[key] = value;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const started = Date.now();
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "pi-webui-diagnostic",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "pi-webui-mcp-diagnostic", version: "1.0.0" },
+          },
+        }),
+      });
+      const latencyMs = Date.now() - started;
+      if (!response.ok) return { status: "disconnected", statusText: `استجابة HTTP ${response.status}`, latencyMs };
+      return { status: "connected", statusText: "تمت مصافحة MCP بنجاح", latencyMs };
+    } catch (err) {
+      return { status: "disconnected", statusText: err?.name === "AbortError" ? "انتهت مهلة الاتصال" : "تعذّر الوصول إلى الخادم" , latencyMs: Date.now() - started };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async #diagnoseStdio(server) {
+    if (!server.command || typeof server.command !== "string") {
+      return { status: "disconnected", statusText: "أمر التشغيل غير موجود" };
+    }
+    const started = Date.now();
+    return new Promise((resolve) => {
+      let settled = false;
+      let output = "";
+      const child = spawn(server.command, Array.isArray(server.args) ? server.args.map(String) : [], {
+        cwd: config.workspace,
+        env: { ...process.env, ...(server.env && typeof server.env === "object" ? server.env : {}) },
+        stdio: ["pipe", "pipe", "ignore"],
+        shell: false,
+      });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { child.kill("SIGTERM"); } catch { /* ignore */ }
+        resolve({ ...result, latencyMs: Date.now() - started });
+      };
+      const timer = setTimeout(() => finish({ status: "disconnected", statusText: "انتهت مهلة بدء خادم MCP" }), 8000);
+      child.once("error", (err) => finish({
+        status: "disconnected",
+        statusText: err?.code === "ENOENT" ? "الأمر التنفيذي غير مثبت" : "تعذّر تشغيل خادم MCP",
+      }));
+      child.once("exit", (code) => {
+        if (!settled) finish({ status: "disconnected", statusText: code === 0 ? "أغلق الخادم الاتصال" : "توقّف الخادم قبل المصافحة" });
+      });
+      child.stdout.on("data", (chunk) => {
+        output += chunk.toString("utf8");
+        for (const line of output.split(/\r?\n/)) {
+          const text = line.trim();
+          if (!text || !text.startsWith("{")) continue;
+          try {
+            const message = JSON.parse(text);
+            if (message?.jsonrpc === "2.0" && (message.result || message.error)) {
+              finish(message.error ? { status: "disconnected", statusText: "رفض خادم MCP المصافحة" } : { status: "connected", statusText: "تمت مصافحة MCP بنجاح" });
+              return;
+            }
+          } catch { /* انتظر رسالة JSON-RPC مكتملة */ }
+        }
+        if (output.length > 64_000) output = output.slice(-8_000);
+      });
+      try {
+        child.stdin.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: "pi-webui-diagnostic",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "pi-webui-mcp-diagnostic", version: "1.0.0" },
+          },
+        })}\n`);
+      } catch {
+        finish({ status: "disconnected", statusText: "تعذّر إرسال طلب المصافحة" });
+      }
+    });
+  }
+
+  async diagnose(name, scope = "user") {
+    const { server } = this.#find(name, scope);
+    if (server.enabled === false) {
+      return this.#saveStatus(name, scope, { status: "disabled", statusText: "الخادم معطّل" });
+    }
+    const result = server.command ? await this.#diagnoseStdio(server) : server.url ? await this.#diagnoseHttp(server) : { status: "disconnected", statusText: "إعداد MCP غير مكتمل" };
+    return this.#saveStatus(name, scope, result);
+  }
+
+  async diagnoseAll() {
+    const servers = this.list().servers.filter((server) => server.enabled);
+    for (const server of servers) await this.diagnose(server.name, server.scope);
     return this.list();
   }
 }

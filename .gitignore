@@ -4,3 +4,9 @@ data/
 .run/
 *.log
 .DS_Store
+dist/
+deploy/
+public/sim/
+docs/veda-twas-sim/
+*.bak.*
+.env.bak*

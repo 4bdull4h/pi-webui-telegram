@@ -84,13 +84,19 @@
         <header class="topbar">
           <button class="icon-btn menu-btn" id="menuBtn" title="القائمة" aria-label="القائمة"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
           <div class="topbar-controls">
-            <label class="select-wrap">
-              <span>الوكيل</span>
-              <select id="agentSelect"></select>
+            <label class="select-wrap picker-wrap picker-agent">
+              <span class="picker-label">الوكيل</span>
+              <div class="picker-control">
+                <input id="agentSearch" class="picker-search" type="search" placeholder="بحث في الوكلاء…" aria-label="البحث في الوكلاء" autocomplete="off" spellcheck="false">
+                <select id="agentSelect" aria-label="اختيار الوكيل"></select>
+              </div>
             </label>
-            <label class="select-wrap">
-              <span>النموذج</span>
-              <select id="modelSelect"></select>
+            <label class="select-wrap picker-wrap picker-model">
+              <span class="picker-label">النموذج / المزوّد</span>
+              <div class="picker-control">
+                <input id="modelSearch" class="picker-search" type="search" placeholder="ابحث عن نموذج أو مزوّد…" aria-label="البحث عن نموذج أو مزوّد" autocomplete="off" spellcheck="false">
+                <select id="modelSelect" aria-label="اختيار النموذج والمزوّد"></select>
+              </div>
             </label>
             <label class="select-wrap">
               <span>التفكير</span>
@@ -113,12 +119,14 @@
             <div class="u-head"><span class="u-label">📅 اليوم</span><span class="u-remain" id="uDailyRemain">—</span></div>
             <div class="u-track"><i id="uDailyBar" style="width:0%"></i></div>
             <div class="u-foot"><span id="uDailyUsed">—</span><span id="uDailyLimit">—</span></div>
+            <div class="u-break" id="uDailyBreak"></div>
           </div>
           <div class="u-sep"></div>
           <div class="u-item" data-usage-tab="weekly">
             <div class="u-head"><span class="u-label">🗓️ الأسبوع</span><span class="u-remain" id="uWeeklyRemain">—</span></div>
             <div class="u-track"><i id="uWeeklyBar" style="width:0%"></i></div>
             <div class="u-foot"><span id="uWeeklyUsed">—</span><span id="uWeeklyLimit">—</span></div>
+            <div class="u-break" id="uWeeklyBreak"></div>
           </div>
           <div class="u-sep"></div>
           <div class="u-item u-ctx">
@@ -181,6 +189,8 @@
         </footer>
       </main>
     </div>
+
+    <div class="sidebar-scrim" id="sidebarScrim" aria-hidden="true"></div>
 
     <div class="toast-wrap" id="toasts"></div>
 

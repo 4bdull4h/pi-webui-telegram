@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import config, { ROOT } from "./config.js";
+import config, { ROOT, RUNTIME_HOME } from "./config.js";
 import logger from "./logger.js";
 import { JsonStore } from "./store.js";
 import { PiManager } from "./pi-manager.js";
@@ -12,7 +12,7 @@ import { TelegramBot } from "./telegram-bot.js";
 function banner() {
   const line = "─".repeat(48);
   console.log(`\n\x1b[36m${line}\x1b[0m`);
-  console.log("  \x1b[1mPi — مساعد برمجي عربي\x1b[0m");
+  console.log(`  \x1b[1m${config.assistantName}\x1b[0m`);
   console.log(`  واجهة ويب RTL + بوت تيليجرام`);
   console.log(`\x1b[36m${line}\x1b[0m`);
   console.log(`  مساحة العمل : ${config.workspace}`);
@@ -71,7 +71,7 @@ async function main() {
 
   // إعادة تشغيل مؤجّلة: يكتبها server.sh عندما يُستدعى من داخل الخادم،
   // فننتظر حتى تنتهي المهام الجارية ثم نعيد التشغيل دون قطع الجلسات.
-  const restartFlag = join(ROOT, ".run", "restart.requested");
+  const restartFlag = join(RUNTIME_HOME, ".run", "restart.requested");
   let restartArmedAt = 0;
   const restartWatcher = setInterval(() => {
     if (!existsSync(restartFlag)) {

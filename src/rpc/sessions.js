@@ -20,7 +20,7 @@ const MAX_DIR_DEPTH = 3;
 const TRASH_DIR = ".trash";
 
 /**
- * يفكّ ترميز اسم مجلد المشروع: `--home--asus--` ← `/home/asus`
+ * يفكّ ترميز اسم مجلد المشروع: `--home--user--` ← `/home/user`
  * (pi يحذف الفاصل الأول ويستبدل `/` `\` `:` بـ `-`، ثم يحيط الاسم بـ `--`).
  */
 export function decodeProjectDir(dirName) {

@@ -21,6 +21,17 @@ const SOURCES = ["web", "telegram", "api", "system"];
  */
 const PROMPT_TIMEOUT_MS = 10 * 60_000;
 
+/** نص عربي موجز لقرار الحوار، يُستخدم لإغلاق الواجهة الأخرى بنفس النتيجة. */
+function uiDecisionText(method, payload, sent) {
+  if (!sent) return "أُغلق الحوار";
+  if (payload?.cancelled) return "أُلغي";
+  if (method === "confirm") return payload?.confirmed ? "سماح" : "رفض";
+  if (payload?.value !== undefined && payload?.value !== null && payload?.value !== "") {
+    return String(payload.value);
+  }
+  return "تم الرد";
+}
+
 export class RpcConversation {
   constructor(id, manager) {
     this.id = id;
@@ -34,6 +45,8 @@ export class RpcConversation {
     this.queue = new EventQueue();
     // حوارات امتدادات معلّقة: id → { respond(payload), cancel() }.
     this.pendingUI = new Map();
+    // معرّفات الحوارات المحسومة (أول رد يفوز) لمنع الرد المزدوج عبر القنوات.
+    this.resolvedUI = new Map();
     this.state = { contextUsage: null, thinkingLevels: null, toolNames: [] };
     this.remote = {
       sessionId: null,
@@ -420,14 +433,16 @@ export class RpcConversation {
    * payload: { value } | { confirmed } | { cancelled: true }
    * @returns {Promise<boolean>} true إن أُرسل الرد فعلاً.
    */
-  async respondExtensionUI(id, payload = {}) {
+  async respondExtensionUI(id, payload = {}, meta = {}) {
     if (!id) return false;
     const pending = this.pendingUI.get(id);
     if (pending) {
-      pending.respond(payload);
+      pending.respond(payload, meta);
       this.touch();
       return true;
     }
+    // أول رد يفوز: إن حُسم الحوار من قناة أخرى لا نرسل رداً ثانياً إلى pi.
+    if (this.resolvedUI.has(id)) return false;
     // احتياط: قد يصل الرد بعد إعادة تشغيل/إعادة ربط؛ نمرّره إن أمكن.
     const client = this.client;
     if (!client) return false;
@@ -440,10 +455,21 @@ export class RpcConversation {
   #awaitExtensionDialog(request, respond) {
     return new Promise((resolve) => {
       let settled = false;
-      const settle = (payload, send) => {
+      const settle = (payload, send, meta = {}) => {
         if (settled) return;
         settled = true;
         this.pendingUI.delete(request.id);
+        const source = meta?.source || null;
+        this.#markResolved(request.id, source);
+        // نُبلّغ كل القنوات (الويب + تيليجرام) بالحسم كي تُغلق الواجهة الأخرى فوراً.
+        this.#emit({
+          type: "extension_ui_resolved",
+          requestId: request.id,
+          method: request.method,
+          source,
+          cancelled: !send || !!payload?.cancelled,
+          decision: uiDecisionText(request.method, payload, send),
+        });
         if (!send) {
           resolve();
           return;
@@ -455,10 +481,22 @@ export class RpcConversation {
       };
       this.pendingUI.set(request.id, {
         request,
-        respond: (payload) => settle(payload, true),
+        respond: (payload, meta) => settle(payload, true, meta),
         cancel: () => settle(null, false),
       });
     });
+  }
+
+  #markResolved(id, source) {
+    if (!id) return;
+    this.resolvedUI.set(id, { at: Date.now(), source });
+    // تقليم دوري: نحتاج الذاكرة فقط لمنع الرد المزدوج القريب.
+    if (this.resolvedUI.size > 200) {
+      const cutoff = Date.now() - 30 * 60_000;
+      for (const [key, value] of this.resolvedUI) {
+        if (value.at < cutoff) this.resolvedUI.delete(key);
+      }
+    }
   }
 
   /** إغلاق كل الحوارات المعلّقة دون إرسال (بعد خروج العملية أو إغلاق الجلسة). */

@@ -5,6 +5,11 @@ import os from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, "..");
+const INSTALLED = ROOT.split(/[\\/]/).includes("node_modules");
+/** دليل الإعدادات والبيانات — مستقل عن مجلد الحزمة عند التثبيت العام. */
+export const RUNTIME_HOME = resolve(
+  process.env.PI_WEBUI_HOME || (INSTALLED ? join(os.homedir(), ".pi-webui") : ROOT),
+);
 
 /** محمّل بسيط لملف .env بدون أي تبعيات خارجية. */
 export function loadEnvFile(path = join(ROOT, ".env")) {
@@ -32,7 +37,7 @@ export function loadEnvFile(path = join(ROOT, ".env")) {
     if (!(key in process.env)) process.env[key] = val;
   }
 }
-loadEnvFile();
+loadEnvFile(join(RUNTIME_HOME, ".env"));
 
 const bool = (v, fallback = false) => {
   if (v === undefined || v === null || v === "") return fallback;
@@ -50,6 +55,7 @@ const notifyMode = (() => {
 })();
 const sharedSessionId = process.env.SHARED_SESSION_ID ?? "shared:main";
 const syncWebTelegram = bool(process.env.SYNC_WEB_TELEGRAM, true) && !!sharedSessionId;
+const language = process.env.BOT_LANGUAGE === "en" ? "en" : "ar";
 
 const list = (v) =>
   String(v ?? "")
@@ -65,9 +71,11 @@ export const config = {
   port: int(process.env.PORT, 8787),
   workspace: resolve(process.env.WORKSPACE || os.homedir()),
   agentDir: resolve(process.env.PI_AGENT_DIR || join(os.homedir(), ".pi", "agent")),
-  dataDir: resolve(process.env.DATA_DIR || join(ROOT, "data")),
+  dataDir: resolve(process.env.DATA_DIR || join(RUNTIME_HOME, "data")),
   publicDir: join(ROOT, "public"),
-  language: process.env.BOT_LANGUAGE === "en" ? "en" : "ar",
+  language,
+  assistantName: (process.env.ASSISTANT_NAME || "").trim() || (language === "en" ? "Pi Assistant" : "مساعد Pi"),
+  supportHandle: (process.env.SUPPORT_HANDLE || "@coder480").trim(),
   sharedSessionId,
   syncWebTelegram,
 

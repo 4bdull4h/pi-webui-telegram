@@ -51,7 +51,14 @@ EOF
 }
 
 pid_of() {
-  [ -f "$PID_FILE" ] && cat "$PID_FILE" 2>/dev/null || true
+  if [ -f "$PID_FILE" ]; then
+    cat "$PID_FILE" 2>/dev/null
+    return 0
+  fi
+  # تثبيت systemd: لا يوجد ملف PID، نأخذ MainPID من الوحدة.
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user show -p MainPID --value pi-webui.service 2>/dev/null | grep -E '^[0-9]+$' || true
+  fi
 }
 
 is_running() {
@@ -88,7 +95,16 @@ wait_health() {
   return 1
 }
 
+systemd_active() {
+  command -v systemctl >/dev/null 2>&1 && \
+    systemctl --user is-active --quiet pi-webui.service 2>/dev/null
+}
+
 cmd_start() {
+  if systemd_active; then
+    echo "الخدمة تعمل عبر systemd (pi-webui.service). استخدم: systemctl --user restart pi-webui"
+    return 0
+  fi
   if is_running; then
     echo "الخادم يعمل بالفعل (PID $(pid_of))."
     return 0
@@ -183,6 +199,19 @@ cmd_restart_worker() {
 }
 
 cmd_status() {
+  if systemd_active; then
+    echo "الحالة   : يعمل عبر systemd ✅"
+    echo "الخدمة  : pi-webui.service ($(systemctl --user is-enabled pi-webui.service 2>/dev/null))"
+    echo "PID      : $(systemctl --user show -p MainPID --value pi-webui.service 2>/dev/null)"
+    echo "الويب    : http://localhost:${PORT:-8787}"
+    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+      echo "الصحة    : سليم"
+    else
+      echo "الصحة    : لا يستجيب بعد"
+    fi
+    echo "السجل    : $ROOT/.run/systemd.log"
+    return 0
+  fi
   if is_running; then
     echo "الحالة   : يعمل ✅"
     echo "PID      : $(pid_of)"

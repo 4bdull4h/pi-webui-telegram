@@ -531,6 +531,13 @@ export class WebServer {
         this.broadcast({ type: "mcp", mcp: result });
         return sendJson(res, 200, result);
       }
+      const mcpDiagnoseMatch = /^\/api\/mcp\/([^/]+)\/diagnose$/.exec(pathname);
+      if (mcpDiagnoseMatch && method === "POST") {
+        const body = await readBody(req);
+        const result = await this.mcp.diagnose(mcpDiagnoseMatch[1], body.scope === "project" ? "project" : "user");
+        this.broadcast({ type: "mcp", mcp: result });
+        return sendJson(res, 200, result);
+      }
 
       // ===== المهارات =====
       if (pathname === "/api/skills") {
@@ -774,7 +781,8 @@ export class WebServer {
 
   clientConfig() {
     return {
-      appName: "Pi",
+      appName: config.assistantName,
+      supportHandle: config.supportHandle,
       language: config.language,
       workspace: config.workspace,
       defaults: {
@@ -862,6 +870,12 @@ export class WebServer {
       }
       const unsubscribe = conversation.subscribe((event) => {
         send({ type: "event", event });
+        if (event.type === "extension_ui_resolved") {
+          // أول رد يفوز: نحرّر التتبّع كي لا نعيد عرضه عند إعادة الربط.
+          const current = this.clients.get(ws);
+          if (current?.pendingUI && event.requestId) current.pendingUI.delete(event.requestId);
+          return;
+        }
         if (event.type !== "extension_ui") return;
         // جسر حوارات الامتدادات: رسالة مخصّصة أوضح للعميل + تتبّع الحوارات المعلّقة.
         send({ type: "extension_ui", conversationId: id, request: extensionUiRequest(event) });
@@ -1097,7 +1111,7 @@ export class WebServer {
               requestId,
               decision: describeUiResponse(payload),
             });
-            await conversation.respondExtensionUI(requestId, payload);
+            await conversation.respondExtensionUI(requestId, payload, { source: "web" });
             break;
           }
           case "extension_ui_dismiss":
@@ -1110,7 +1124,7 @@ export class WebServer {
                 requestId: msg.id,
                 decision: "dismissed (مهلة/إغلاق محلي)",
               });
-              await conversation.respondExtensionUI(msg.id, { cancelled: true });
+              await conversation.respondExtensionUI(msg.id, { cancelled: true }, { source: "web" });
             }
             break;
           case "bind":

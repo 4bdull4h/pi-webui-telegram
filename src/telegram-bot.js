@@ -138,7 +138,8 @@ export class TelegramBot {
       pendingText: null,
       lastRenderAt: 0,
     };
-    this.primaryChatId = config.telegram.allowedChats[0] || config.telegram.allowedUsers[0] || null;
+    this.primaryChatId = config.telegram.allowedChats[0] || config.telegram.allowedUsers[0] || this.#loadTargetChat() || null;
+    this.notifyModeOverride = this.#loadNotifyMode();
     // C1: حوارات الامتدادات المعلّقة على رد المستخدم (موافقة الأدوات وغيرها).
     // requestId → { requestId, chatId, messageId, conv, method, header, options, timer }
     this.pendingUI = new Map();
@@ -154,7 +155,61 @@ export class TelegramBot {
 
   /** final | compact | live (D1). */
   get notifyMode() {
+    if (this.notifyModeOverride) return this.notifyModeOverride;
     return config.telegram.notifyMode || "final";
+  }
+
+  /** مسار حفظ وضع الإشعارات المختار من تيليجرام. */
+  #modePath() {
+    return join(config.dataDir, "telegram-mode.json");
+  }
+
+  #loadNotifyMode() {
+    try {
+      const raw = JSON.parse(readFileSync(this.#modePath(), "utf8"));
+      const mode = raw?.mode;
+      return ["final", "compact", "live"].includes(mode) ? mode : null;
+    } catch {
+      return null;
+    }
+  }
+
+  #saveNotifyMode(mode) {
+    this.notifyModeOverride = mode;
+    try {
+      mkdirSync(config.dataDir, { recursive: true });
+      writeFileSync(
+        this.#modePath(),
+        JSON.stringify({ mode, updatedAt: new Date().toISOString() }, null, 2),
+      );
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر حفظ وضع الإشعارات:", err?.message || err);
+    }
+  }
+
+  /** أمر /mode: تغيير درجة متابعة الويب من تيليجرام. */
+  async cmdMode(chatId, value) {
+    const mode = String(value || "").trim().toLowerCase();
+    if (!["final", "compact", "live"].includes(mode)) {
+      await this.api.sendMessage(
+        chatId,
+        [
+          `🔔 <b>وضع الإشعارات الحالي:</b> <code>${escapeHtml(this.notifyMode)}</code>`,
+          "",
+          "<b>final</b> — رسالة واحدة بعد كل مهمة (أقل إزعاجاً)",
+          "<b>compact</b> — رسالة تنفيذ + أسطر تقدّم مختصرة + النتيجة",
+          "<b>live</b> — مزامنة كاملة حيّة مع الويب",
+          "",
+          "للتغيير: <code>/mode compact</code>",
+        ].join("\n"),
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+    this.#saveNotifyMode(mode);
+    await this.api.sendMessage(chatId, `✅ وضع الإشعارات: <code>${escapeHtml(mode)}</code>`, {
+      parse_mode: "HTML",
+    });
   }
 
   /** هل نحن في وضع مكتوم لا يرسل إلا رسالة نهائية؟ */
@@ -172,8 +227,43 @@ export class TelegramBot {
     return this.manager.getOrCreate(this.#conversationId(chatId));
   }
 
-  #setPrimaryChat(chatId) {
-    if (!this.primaryChatId && chatId) this.primaryChatId = String(chatId);
+  #setPrimaryChat(chatId, chatType = null) {
+    if (!chatId) return;
+    const id = String(chatId);
+    if (this.primaryChatId === id) return;
+    // نحافظ على الهدف الأول، وننتقل فقط إلى محادثة خاصة جديدة (المستخدم انتقل).
+    if (this.primaryChatId && chatType !== "private") return;
+    this.primaryChatId = id;
+    this.#saveTargetChat(id);
+  }
+
+  /** مسار حفظ محادثة الهدف حتى تنجو من إعادة التشغيل. */
+  #targetPath() {
+    return join(config.dataDir, "telegram-target.json");
+  }
+
+  #loadTargetChat() {
+    try {
+      const raw = JSON.parse(readFileSync(this.#targetPath(), "utf8"));
+      const id = raw?.chatId ? String(raw.chatId) : null;
+      if (!id) return null;
+      logger.info(`تيليجرام: محادثة هدف محفوظة (${id}).`);
+      return id;
+    } catch {
+      return null;
+    }
+  }
+
+  #saveTargetChat(chatId) {
+    try {
+      mkdirSync(config.dataDir, { recursive: true });
+      writeFileSync(
+        this.#targetPath(),
+        JSON.stringify({ chatId: String(chatId), updatedAt: new Date().toISOString() }, null, 2),
+      );
+    } catch (err) {
+      logger.warn("تيليجرام: تعذّر حفظ محادثة الهدف:", err?.message || err);
+    }
   }
 
   #state(chatId) {
@@ -351,6 +441,8 @@ export class TelegramBot {
     if (!config.syncWebTelegram || !config.sharedSessionId) return;
     // C1: حوارات الامتدادات (موافقة الأدوات) لا تُكتَم أبداً — قبل منطق الكتم.
     if (event?.type === "extension_ui") return this.handleExtensionUi(event, conversation);
+    // أول رد يفوز: إن حُسم الحوار من الويب نُغلق رسالة تيليجرام بنفس النتيجة.
+    if (event?.type === "extension_ui_resolved") return this.handleUiResolved(event);
     // D1: وضعا final/compact يمرّان على المسار المكتوم، وlive يبقى كما هو.
     if (this.quietMode) return this.handleQuietEvent(event);
     const target = this.mirrorTargetChat();
@@ -913,6 +1005,53 @@ export class TelegramBot {
     this.#armTimeout(event, entry);
   }
 
+  /** إغلاق رسالة تيليجرام عندما يحسم الويب (أو قناة أخرى) الحوار. */
+  async handleUiResolved(event) {
+    const requestId = event?.requestId;
+    if (!requestId) return;
+    const entry = this.pendingUI.get(requestId);
+    if (!entry) return;
+    this.#clearPending(entry);
+    // تيليجرام نفسه يُعدّل رسالته عند الحسم من أزراره.
+    if (event.source === "telegram") return;
+    const origin = event.source === "web" ? "الويب" : "قناة أخرى";
+    const decision = event.decision ? `✅ ${escapeHtml(String(event.decision))}` : "✅ تم الحسم";
+    this.#logDecision(entry, `resolved-by-${event.source || "other"}`);
+    if (!entry.messageId || entry.chatId == null) return;
+    const body = truncateHtml(
+      `${entry.header}\n\n<b>${decision}</b>\n<i>تم الرد من ${origin}</i>`,
+      config.telegram.maxMessageLength,
+    );
+    await this.api
+      .editMessageText(entry.chatId, entry.messageId, body, {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      })
+      .catch(() => undefined);
+  }
+
+  /** تشخيص الربط: يعرض معرّفات المحادثة وهل هي هدف المزامنة. */
+  async cmdWhoami(message) {
+    const chat = message.chat || {};
+    const from = message.from || {};
+    const isTarget = String(chat.id) === String(this.primaryChatId || "");
+    const text = [
+      "🪪 <b>بيانات هذه المحادثة</b>",
+      `• chat_id: <code>${escapeHtml(String(chat.id ?? "—"))}</code>`,
+      `• النوع: <code>${escapeHtml(String(chat.type || "—"))}</code>`,
+      `• user_id: <code>${escapeHtml(String(from.id ?? "—"))}</code>`,
+      `• هدف مزامنة الويب: <b>${isTarget ? "نعم ✅" : "لا"}</b>`,
+      `• مزامنة الجلسة: <b>${config.syncWebTelegram ? "مفعّلة" : "معطّلة"}</b>`,
+      `• الجلسة: <code>${escapeHtml(String(config.sharedSessionId || "—"))}</code>`,
+      `• وضع الإشعارات: <code>${escapeHtml(this.notifyMode)}</code>`,
+    ].join("\n");
+    await this.api.sendMessage(chat.id, text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: this.mainKeyboard(),
+    });
+  }
+
   /** معالج حدث extension_ui القادم من المحادثة. */
   async handleExtensionUi(event, conversation = null) {
     const chatId = this.mirrorTargetChat();
@@ -974,7 +1113,7 @@ export class TelegramBot {
     this.#clearPending(entry);
     const conv = entry.conv || this.#conversation(chatId);
     try {
-      await conv.respondExtensionUI(entry.requestId, { value: text });
+      await conv.respondExtensionUI(entry.requestId, { value: text }, { source: "telegram" });
     } catch (err) {
       logger.warn("تيليجرام: تعذّر إرسال رد الحوار:", err?.message || err);
     }
@@ -1025,7 +1164,7 @@ export class TelegramBot {
         entry,
         entry.method === "confirm" ? (payload.confirmed ? "allowed" : "rejected") : "selected",
       );
-      await conv.respondExtensionUI(requestId, payload);
+      await conv.respondExtensionUI(requestId, payload, { source: "telegram" });
       const targetChat = chatId ?? entry.chatId;
       if (messageId && targetChat != null) {
         const body = truncateHtml(
@@ -1050,6 +1189,11 @@ export class TelegramBot {
     const userId = String(from.id);
     const chatId = String(update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? "");
     const { allowedUsers, allowedChats } = config.telegram;
+    // fail-closed: قوائم فارغة = رفض الجميع (السلوك السابق كان يسمح للجميع بلا قيد)
+    if (!allowedUsers.length && !allowedChats.length) {
+      logger.warn("تيليجرام: لا توجد قوائم تفويض — رفض الطلب (fail-closed). اضبط TELEGRAM_ALLOWED_USERS في .env");
+      return false;
+    }
     if (allowedUsers.length && !allowedUsers.includes(userId)) return false;
     if (allowedChats.length && !allowedChats.includes(chatId)) return false;
     return true;
@@ -1062,6 +1206,11 @@ export class TelegramBot {
     }
     await this.api.getMe().then((me) => logger.ok(`تيليجرام: متصل كـ @${me.username}`));
     this.bindSharedMirror();
+    if (config.syncWebTelegram && !this.mirrorTargetChat()) {
+      logger.warn(
+        "تيليجرام: لا توجد محادثة هدف بعد — أرسل /start أو /whoami إلى البوت مرة واحدة لتثبيت المزامنة.",
+      );
+    }
     // D1: watchdog — إن كانت هناك مهمة معلّقة من دورة سابقة أبلغ ثم امسح الملف.
     await this.checkInterruptedRun().catch(() => undefined);
     await this.api
@@ -1135,6 +1284,7 @@ export class TelegramBot {
     }
     this.#setPrimaryChat(
       update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? null,
+      update.message?.chat?.type ?? update.callback_query?.message?.chat?.type ?? null,
     );
     if (update.callback_query) return this.handleCallback(update.callback_query);
     if (update.message) return this.handleMessage(update.message);
@@ -1169,6 +1319,12 @@ export class TelegramBot {
         return this.cmdCompact(chatId);
       case "/sessions":
         return this.showSessions(chatId);
+      case "/whoami":
+        return this.cmdWhoami(message);
+      case "/mode":
+        return this.cmdMode(chatId, text.split(/\s+/)[1]);
+      case "/ping":
+        return this.api.sendMessage(chatId, "🏓 pong");
       case "/restart":
         return this.cmdRestart(chatId);
       default: {

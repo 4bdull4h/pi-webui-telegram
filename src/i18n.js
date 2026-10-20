@@ -6,10 +6,10 @@
 const STRINGS = {
   ar: {
     dir: "rtl",
-    appName: "مساعد Pi",
+    appName: "{app}",
     appTagline: "وكيل برمجي ذكي بين يديك",
     welcome:
-      "🤖 <b>مرحباً بك في مساعد Pi</b>\n\n" +
+      "🤖 <b>مرحباً بك في {app}</b>\n\n" +
       "وكيل برمجي ذكي يستطيع قراءة الملفات، تشغيل الأوامر، وتحرير الكود.\n\n" +
       "اكتب رسالتك مباشرةً وسأبدأ العمل، أو استخدم الأزرار أدناه.",
     help:
@@ -24,7 +24,8 @@ const STRINGS = {
       "/help — عرض هذه المساعدة\n\n" +
       "💡 <b>نصائح</b>\n" +
       "• اكتب طلبك بلغة واضحة، وسأرد بنفس لغتك.\n" +
-      "• يمكنك إرسال عدة رسائل أثناء العمل لإعادة التوجيه.",
+      "• يمكنك إرسال عدة رسائل أثناء العمل لإعادة التوجيه.\n\n" +
+      "🧑‍💻 الدعم والمساعدة: {support}",
     newSession: "✨ <b>بدأنا جلسة جديدة.</b>\nالسياق السابق تم مسحه — تفضّل بطلبك.",
     processing: "⏳ جارٍ العمل…",
     // ===== المرحلة D1: الرسالة النهائية فقط =====
@@ -104,10 +105,10 @@ const STRINGS = {
   },
   en: {
     dir: "ltr",
-    appName: "Pi Assistant",
+    appName: "{app}",
     appTagline: "A powerful coding agent at your fingertips",
     welcome:
-      "🤖 <b>Welcome to Pi Assistant</b>\n\n" +
+      "🤖 <b>Welcome to {app}</b>\n\n" +
       "An intelligent coding agent that can read files, run commands, and edit code.\n\n" +
       "Just send your request or use the buttons below.",
     help:
@@ -122,7 +123,8 @@ const STRINGS = {
       "/help — show this help\n\n" +
       "💡 <b>Tips</b>\n" +
       "• Write clearly; I reply in your language.\n" +
-      "• You can send follow-ups while I work.",
+      "• You can send follow-ups while I work.\n\n" +
+      "🧑‍💻 Support: {support}",
     newSession: "✨ <b>Started a new session.</b>\nPrevious context cleared — go ahead.",
     processing: "⏳ Working on your request…",
     // ===== Phase D1: final answer only =====
@@ -202,6 +204,13 @@ const STRINGS = {
   },
 };
 
+export function appLabel(lang) {
+  return (
+    (process.env.ASSISTANT_NAME || "").trim() ||
+    ((STRINGS[lang] || STRINGS.ar).dir === "rtl" ? "مساعد Pi" : "Pi Assistant")
+  );
+}
+
 export function t(lang, key, vars = {}) {
   const table = STRINGS[lang] || STRINGS.ar;
   const fallback = STRINGS.ar;
@@ -209,7 +218,12 @@ export function t(lang, key, vars = {}) {
   if (value === undefined) value = key.split(".").reduce((o, k) => (o == null ? o : o[k]), fallback);
   if (value === undefined) return key;
   if (typeof value !== "string") return value;
-  return value.replace(/\{(\w+)\}/g, (_, k) => (vars[k] ?? "").toString());
+  const support = (process.env.SUPPORT_HANDLE || "@coder480").trim();
+  return value.replace(/\{(\w+)\}/g, (_, k) => {
+    if (k === "app") return (vars.app ?? appLabel(lang)).toString();
+    if (k === "support") return (vars.support ?? support).toString();
+    return (vars[k] ?? "").toString();
+  });
 }
 
 export function thinkingLabel(lang, level) {
@@ -220,4 +234,4 @@ export function isRtl(lang) {
   return (STRINGS[lang] || STRINGS.ar).dir === "rtl";
 }
 
-export default { t, thinkingLabel, isRtl };
+export default { t, thinkingLabel, isRtl, appLabel };

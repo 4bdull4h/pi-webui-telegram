@@ -1,25 +1,65 @@
 {
   "name": "pi-webui-telegram",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "description": "واجهة ويب عربية RTL وبوت تيليجرام لوكيل Pi البرمجي",
+  "description": "Arabic RTL web UI and Telegram bridge for the Pi coding agent — واجهة عربية وبوت تيليجرام لوكيل Pi",
   "main": "src/index.js",
+  "bin": {
+    "pi-webui": "bin/pi-webui.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "!**/*.bak*",
+    "!**/*.log",
+    "public/**/*",
+    "!public/sim/**",
+    "extensions/",
+    "scripts/install-wizard.mjs",
+    "scripts/setup.mjs",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "telegram",
+    "webui",
+    "arabic",
+    "rtl",
+    "ai-agent"
+  ],
+  "author": "coder480 (https://t.me/coder480)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
   "scripts": {
-    "setup": "node scripts/setup.mjs",
+    "setup": "node scripts/install-wizard.mjs",
+    "link": "node scripts/setup.mjs",
     "start": "node src/index.js",
     "restart": "./restart.sh",
     "web": "node src/index.js --no-telegram",
     "telegram": "node src/index.js --no-web",
+    "check": "node --check src/index.js && node --check src/web-server.js && node --check src/telegram-bot.js && node --check src/rpc/conversation.js && node --check src/rpc/shared.js && node --check src/rpc/sessions.js && node --check public/app.js && node --check scripts/install-wizard.mjs && node --check bin/pi-webui.mjs",
+    "dev": "node --watch src/index.js",
     "test:approvals": "node scripts/test-approvals.mjs --self-test",
     "test:telegram-ui": "node scripts/test-telegram-ui.mjs --self-test",
-    "check": "node --check src/index.js && node --check src/web-server.js && node --check src/telegram-bot.js && node --check src/rpc/conversation.js && node --check src/rpc/shared.js && node --check src/rpc/sessions.js && node --check public/app.js",
-    "dev": "node --watch src/index.js",
     "test:attachments": "node scripts/test-attachments.mjs --self-test",
     "test:rpc-passthrough": "node scripts/test-rpc-passthrough.mjs --self-test",
-    "test:disk-sessions": "node scripts/test-disk-sessions.mjs --self-test"
-  },
-  "engines": {
-    "node": ">=20"
+    "test:disk-sessions": "node scripts/test-disk-sessions.mjs --self-test",
+    "test:ui-first-wins": "node scripts/test-ui-first-wins.mjs"
   }
 }

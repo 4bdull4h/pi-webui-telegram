@@ -10,6 +10,7 @@ const els = {
   sidebar: $("#sidebar"),
   sidebarClose: $("#sidebarClose"),
   menuBtn: $("#menuBtn"),
+  sidebarScrim: $("#sidebarScrim"),
   sessions: $("#sessions"),
   sessionsDisk: $("#sessionsDisk"),
   sessScopeUi: $("#sessScopeUi"),
@@ -19,9 +20,11 @@ const els = {
   sessDiskCount: $("#sessDiskCount"),
   newSessionBtn: $("#newSessionBtn"),
   agentSelect: $("#agentSelect"),
+  agentSearch: $("#agentSearch"),
   agentBadge: $("#agentBadge"),
   syncBadge: $("#syncBadge"),
   modelSelect: $("#modelSelect"),
+  modelSearch: $("#modelSearch"),
   thinkingSelect: $("#thinkingSelect"),
   sessionBadge: $("#sessionBadge"),
   statusBtn: $("#statusBtn"),
@@ -67,10 +70,12 @@ const els = {
   uDailyBar: $("#uDailyBar"),
   uDailyUsed: $("#uDailyUsed"),
   uDailyLimit: $("#uDailyLimit"),
+  uDailyBreak: $("#uDailyBreak"),
   uWeeklyRemain: $("#uWeeklyRemain"),
   uWeeklyBar: $("#uWeeklyBar"),
   uWeeklyUsed: $("#uWeeklyUsed"),
   uWeeklyLimit: $("#uWeeklyLimit"),
+  uWeeklyBreak: $("#uWeeklyBreak"),
   uCtxRemain: $("#uCtxRemain"),
   uCtxBar: $("#uCtxBar"),
   uCtxText: $("#uCtxText"),
@@ -816,6 +821,34 @@ function addErrorMessage(text) {
   scrollToBottom();
 }
 
+function syncToolGroup(group) {
+  if (!group || !group.classList.contains("tools")) return;
+  const cards = [...group.querySelectorAll(":scope > .tool")];
+  const count = cards.length;
+  const running = cards.some((card) => card.classList.contains("running"));
+  const failed = cards.some((card) => card.classList.contains("error"));
+  const last = cards[cards.length - 1];
+  const name = last?.querySelector(".t-name")?.textContent?.trim() || "";
+
+  group.classList.toggle("has-tools", count > 0);
+  group.classList.toggle("is-running", running);
+  group.classList.toggle("has-error", failed && !running);
+
+  const label = group.querySelector(".ts-label");
+  if (label) label.textContent = count === 1 ? "خطوة واحدة" : `${count} خطوات`;
+  const status = group.querySelector(".ts-status");
+  if (status) {
+    status.textContent = running
+      ? `${name} · يعمل…`
+      : failed
+        ? `${name} · خطأ`
+        : name
+          ? `${name} · انتهى`
+          : "";
+  }
+  if (failed && !running) group.open = true;
+}
+
 function createToolCard(container, { id, name, hint }) {
   const card = document.createElement("div");
   card.className = "tool running";
@@ -834,6 +867,7 @@ function createToolCard(container, { id, name, hint }) {
   });
   container.appendChild(card);
   if (id) state.toolCards.set(id, card);
+  syncToolGroup(container);
   return card;
 }
 
@@ -910,6 +944,7 @@ function updateToolCard(card, { output, isError }) {
     card.classList.add("open");
     card.querySelector(".tool-head").setAttribute("aria-expanded", "true");
   }
+  syncToolGroup(card.parentElement);
   scrollToBottom();
 }
 
@@ -921,8 +956,9 @@ function beginAssistantTurn() {
   const md = document.createElement("div");
   md.className = "md streaming";
   md.dir = "auto";
-  const tools = document.createElement("div");
+  const tools = document.createElement("details");
   tools.className = "tools";
+  tools.innerHTML = `<summary class="tools-summary"><span class="ts-icon" aria-hidden="true">🛠️</span><span class="ts-label">الخطوات</span><span class="ts-status"></span><span class="ts-chevron" aria-hidden="true">▾</span></summary>`;
   bubble.append(thinkingBox, md, tools);
   wrap.classList.add("generating");
 
@@ -977,6 +1013,7 @@ function beginAssistantTurn() {
       wrap.classList.remove("generating");
       md.classList.remove("streaming");
       thinkingBox.style.display = thinking ? "" : "none";
+      syncToolGroup(tools);
       const meta = document.createElement("div");
       meta.className = "msg-meta";
       const parts = [];
@@ -991,7 +1028,7 @@ function beginAssistantTurn() {
       }
     },
     removeIfEmpty() {
-      if (!raw.trim() && !thinking.trim() && tools.children.length === 0) wrap.remove();
+      if (!raw.trim() && !thinking.trim() && tools.querySelectorAll(".tool").length === 0) wrap.remove();
     },
   };
   return turn;
@@ -1043,25 +1080,49 @@ function setStreaming(streaming) {
       : "اكتب / لعرض الأوامر والمهارات والقوالب.";
 }
 
-function populateModels() {
+function normalizePickerQuery(value) {
+  return String(value || "").trim().toLocaleLowerCase();
+}
+
+function modelMatchesQuery(model, query) {
+  if (!query) return true;
+  return [model.provider, model.id, model.name]
+    .filter(Boolean)
+    .some((value) => String(value).toLocaleLowerCase().includes(query));
+}
+
+function populateModels(query = normalizePickerQuery(els.modelSearch?.value)) {
   const select = els.modelSelect;
+  if (!select) return;
+  const selected = select.value || (state.current ? `${state.current.provider}/${state.current.model}` : "");
   select.innerHTML = "";
   const groups = new Map();
   for (const model of state.models) {
+    if (!modelMatchesQuery(model, query)) continue;
     if (!groups.has(model.provider)) groups.set(model.provider, []);
     groups.get(model.provider).push(model);
   }
-  for (const [provider, models] of [...groups.entries()].sort()) {
+  for (const [provider, models] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const group = document.createElement("optgroup");
-    group.label = provider;
+    group.label = `${provider} · ${models.length}`;
     for (const model of models) {
       const option = document.createElement("option");
       option.value = `${model.provider}/${model.id}`;
-      option.textContent = model.name || model.id;
+      option.textContent = model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id;
+      option.title = `${model.provider}/${model.id}`;
       group.appendChild(option);
     }
     select.appendChild(group);
   }
+  if (!select.options.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = query ? "لا توجد نتائج مطابقة" : "لا توجد نماذج متاحة";
+    select.appendChild(option);
+  }
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+  else if (select.options[0]?.value) select.selectedIndex = 0;
+  select.setAttribute("aria-label", query ? `النماذج المطابقة للبحث: ${query}` : "اختيار النموذج والمزوّد");
 }
 
 function populateThinking() {
@@ -1120,7 +1181,7 @@ function renderSessions() {
     btn.addEventListener("click", () => {
       if (!session.sessionFile) return;
       send({ type: "switch_session", sessionFile: session.sessionFile });
-      els.sidebar.classList.remove("open");
+      setMobileSidebarOpen(false);
     });
     els.sessions.appendChild(btn);
   }
@@ -1378,32 +1439,106 @@ function applyAgent(agent) {
   }
 }
 
-function populateAgents() {
+function agentMatchesQuery(agent, query) {
+  if (!query) return true;
+  return [agent.id, agent.name, agent.role, agent.description]
+    .filter(Boolean)
+    .some((value) => String(value).toLocaleLowerCase().includes(query));
+}
+
+function populateAgents(query = normalizePickerQuery(els.agentSearch?.value)) {
   const select = els.agentSelect;
   if (!select) return;
   const current = state.agent?.id || state.current?.agent?.id || null;
   select.innerHTML = "";
-  if (!state.agents.length) {
+  const agents = state.agents.filter((agent) => agentMatchesQuery(agent, query));
+  if (!agents.length) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = "لا يوجد وكلاء";
+    option.textContent = query ? "لا توجد نتائج مطابقة" : "لا يوجد وكلاء";
     select.appendChild(option);
+    select.setAttribute("aria-label", query ? `الوكلاء المطابقة للبحث: ${query}` : "اختيار الوكيل");
     return;
   }
-  for (const agent of state.agents) {
+  for (const agent of agents) {
     const option = document.createElement("option");
     option.value = agent.id;
     const role = roleLabel(agent.role);
     const label = agent.name === role ? agent.name : `${agent.name} — ${role}`;
     option.textContent = `${agent.emoji || "🤖"} ${label}${agent.enabled === false ? " (معطّل)" : ""}`;
+    option.title = agent.description || `${agent.id} · ${role}`;
     if (agent.enabled === false) option.disabled = true;
     select.appendChild(option);
   }
-  if (current && state.agents.some((a) => a.id === current && a.enabled !== false)) {
+  if (current && agents.some((agent) => agent.id === current && agent.enabled !== false)) {
     select.value = current;
-  } else if (state.agents[0]) {
-    select.value = state.agents[0].id;
+  } else {
+    const firstEnabled = agents.find((agent) => agent.enabled !== false);
+    if (firstEnabled) select.value = firstEnabled.id;
   }
+  select.setAttribute("aria-label", query ? `الوكلاء المطابقة للبحث: ${query}` : "اختيار الوكيل");
+}
+
+function usageRatio(agg) {
+  const tokens = Number(agg?.tokens) || 0;
+  const limit = Number(agg?.tokenLimit) || 0;
+  return limit > 0 ? tokens / limit : 0;
+}
+
+function fmtRatio(ratio) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return "";
+  return ratio >= 10 ? `×${Math.round(ratio)}` : `×${ratio.toFixed(1).replace(/\.0$/, "")}`;
+}
+
+/** التوكنز الجديدة = input + output + cache write (بدون إعادة قراءة الـ cache). */
+function freshTokensOf(agg) {
+  const fresh = Number(agg?.freshTokens);
+  if (Number.isFinite(fresh)) return fresh;
+  return (Number(agg?.input) || 0) + (Number(agg?.output) || 0) + (Number(agg?.cacheWrite) || 0);
+}
+
+const SIDEBAR_STORAGE = "pi.sidebar";
+const mobileSidebarQuery = window.matchMedia("(max-width: 860px)");
+
+function isMobileSidebar() {
+  return mobileSidebarQuery.matches;
+}
+
+function syncSidebarToggle() {
+  const btn = els.menuBtn;
+  if (!btn) return;
+  const expanded = isMobileSidebar()
+    ? els.sidebar.classList.contains("open")
+    : !document.documentElement.classList.contains("sidebar-collapsed");
+  btn.setAttribute("aria-expanded", String(expanded));
+  btn.setAttribute("aria-label", expanded ? "إخفاء الشريط الجانبي" : "إظهار الشريط الجانبي");
+  btn.title = expanded ? "إخفاء الشريط الجانبي (Ctrl+B)" : "إظهار الشريط الجانبي (Ctrl+B)";
+}
+
+function setSidebarCollapsed(collapsed, { persist = true } = {}) {
+  document.documentElement.classList.toggle("sidebar-collapsed", collapsed);
+  if (persist) {
+    try {
+      localStorage.setItem(SIDEBAR_STORAGE, collapsed ? "collapsed" : "expanded");
+    } catch {
+      /* ignore */
+    }
+  }
+  syncSidebarToggle();
+}
+
+function setMobileSidebarOpen(open) {
+  els.sidebar.classList.toggle("open", open);
+  els.sidebarScrim?.classList.toggle("show", open);
+  syncSidebarToggle();
+}
+
+function toggleSidebar() {
+  if (isMobileSidebar()) {
+    setMobileSidebarOpen(!els.sidebar.classList.contains("open"));
+    return;
+  }
+  setSidebarCollapsed(!document.documentElement.classList.contains("sidebar-collapsed"));
 }
 
 function renderUsage() {
@@ -1427,10 +1562,40 @@ function renderUsage() {
   if (els.uWeeklyBar) els.uWeeklyBar.style.width = `${weeklyPercent}%`;
 
   if (els.uDailyRemain) {
-    els.uDailyRemain.textContent = daily.remainingTokens == null ? "غير محدود" : `متبقي ${fmtCompact(daily.remainingTokens)}`;
+    if (daily.remainingTokens == null) {
+      els.uDailyRemain.textContent = "غير محدود";
+      els.uDailyRemain.classList.remove("over");
+    } else if (usageRatio(daily) > 1.005) {
+      els.uDailyRemain.textContent = `تجاوز ${fmtRatio(usageRatio(daily))}`;
+      els.uDailyRemain.classList.add("over");
+      els.uDailyRemain.title = `الاستهلاك يعادل ${fmtRatio(usageRatio(daily)).slice(1)} ضعف الحد اليومي`;
+    } else {
+      els.uDailyRemain.textContent = `متبقي ${fmtCompact(daily.remainingTokens)}`;
+      els.uDailyRemain.classList.remove("over");
+      els.uDailyRemain.title = "";
+    }
   }
   if (els.uWeeklyRemain) {
-    els.uWeeklyRemain.textContent = weekly.remainingTokens == null ? "غير محدود" : `متبقي ${fmtCompact(weekly.remainingTokens)}`;
+    if (weekly.remainingTokens == null) {
+      els.uWeeklyRemain.textContent = "غير محدود";
+      els.uWeeklyRemain.classList.remove("over");
+    } else if (usageRatio(weekly) > 1.005) {
+      els.uWeeklyRemain.textContent = `تجاوز ${fmtRatio(usageRatio(weekly))}`;
+      els.uWeeklyRemain.classList.add("over");
+      els.uWeeklyRemain.title = `الاستهلاك يعادل ${fmtRatio(usageRatio(weekly)).slice(1)} ضعف الحد الأسبوعي`;
+    } else {
+      els.uWeeklyRemain.textContent = `متبقي ${fmtCompact(weekly.remainingTokens)}`;
+      els.uWeeklyRemain.classList.remove("over");
+      els.uWeeklyRemain.title = "";
+    }
+  }
+  if (els.uDailyBreak) {
+    els.uDailyBreak.textContent = `جديد ${fmtCompact(freshTokensOf(daily))} · cache ${fmtCompact(daily.cacheRead || 0)}`;
+    els.uDailyBreak.title = "الجديد = input + output + cache write · cache = إعادة قراءة السياق المخزّن";
+  }
+  if (els.uWeeklyBreak) {
+    els.uWeeklyBreak.textContent = `جديد ${fmtCompact(freshTokensOf(weekly))} · cache ${fmtCompact(weekly.cacheRead || 0)}`;
+    els.uWeeklyBreak.title = "الجديد = input + output + cache write · cache = إعادة قراءة السياق المخزّن";
   }
   if (els.uDailyUsed) {
     els.uDailyUsed.textContent = `${fmtCompact(daily.tokens || 0)} توكن · ${fmtCost(daily.cost || 0)}`;
@@ -1733,6 +1898,9 @@ function renderQueueBar(queue) {
 
 function handleConversationEvent(event) {
   switch (event.type) {
+    case "extension_ui_resolved":
+      closeResolvedExtensionDialog(event);
+      break;
     case "queue":
       renderQueueBar(event);
       break;
@@ -1777,6 +1945,7 @@ function handleConversationEvent(event) {
       const card = state.toolCards.get(event.id);
       const status = card?.querySelector(".t-status");
       if (status && event.output) status.textContent = event.output;
+      syncToolGroup(card?.parentElement);
       break;
     }
     case "tool_end": {
@@ -3124,6 +3293,21 @@ function syncSoundButton() {
   btn.setAttribute("aria-pressed", on ? "true" : "false");
   btn.title = on ? L("نغمة التنبيه: مفعّلة", "Alert sound: on") : L("نغمة التنبيه: مكتومة", "Alert sound: muted");
   btn.setAttribute("aria-label", btn.title);
+}
+
+/** الويب يعرض قراراً حُسم من قناة أخرى (تيليجرام): يُغلق النافذة ويُبلّغ بالمصدر. */
+function closeResolvedExtensionDialog(event) {
+  const requestId = event?.requestId;
+  if (!requestId) return;
+  const ui = state.extUi;
+  ui.queue = ui.queue.filter((item) => item.id !== requestId);
+  if (ui.current?.id !== requestId) {
+    renderApprovalQueue();
+    return;
+  }
+  finishExtensionDialog();
+  const origin = event.source === "telegram" ? "تيليجرام" : "قناة أخرى";
+  toast(`✅ تم الحسم من ${origin}: ${event.decision || "—"}`, "success");
 }
 
 function handleExtensionUI(request) {
@@ -4901,7 +5085,7 @@ function bindUi() {
   els.newSessionBtn.addEventListener("click", () => {
     // B1: «محادثة جديدة» تفتح تبويباً مستقلاً؛ الجلسة المشتركة مع تيليجرام تبقى كما هي.
     addTab();
-    els.sidebar.classList.remove("open");
+    setMobileSidebarOpen(false);
   });
 
   els.newTabBtn?.addEventListener("click", () => addTab());
@@ -4937,9 +5121,15 @@ function bindUi() {
     }
   });
 
+  els.modelSearch?.addEventListener("input", () => {
+    populateModels();
+  });
+  els.agentSearch?.addEventListener("input", () => {
+    populateAgents();
+  });
   els.modelSelect.addEventListener("change", () => {
     const [provider, ...rest] = els.modelSelect.value.split("/");
-    send({ type: "set_model", provider, model: rest.join("/") });
+    if (provider && rest.length) send({ type: "set_model", provider, model: rest.join("/") });
   });
   els.agentSelect.addEventListener("change", () => {
     const agentId = els.agentSelect.value;
@@ -5140,8 +5330,37 @@ function bindUi() {
     /* ignore */
   }
 
-  els.menuBtn.addEventListener("click", () => els.sidebar.classList.toggle("open"));
-  els.sidebarClose.addEventListener("click", () => els.sidebar.classList.remove("open"));
+  els.menuBtn.addEventListener("click", toggleSidebar);
+  els.sidebarClose.addEventListener("click", () => {
+    if (isMobileSidebar()) setMobileSidebarOpen(false);
+    else setSidebarCollapsed(true);
+  });
+  els.sidebarScrim?.addEventListener("click", () => setMobileSidebarOpen(false));
+
+  try {
+    if (localStorage.getItem(SIDEBAR_STORAGE) === "collapsed" && !isMobileSidebar()) {
+      document.documentElement.classList.add("sidebar-collapsed");
+    }
+  } catch {
+    /* ignore */
+  }
+  syncSidebarToggle();
+  mobileSidebarQuery.addEventListener("change", () => {
+    setMobileSidebarOpen(false);
+    syncSidebarToggle();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && isMobileSidebar() && els.sidebar.classList.contains("open")) {
+      setMobileSidebarOpen(false);
+      return;
+    }
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (String(event.key).toLowerCase() !== "b") return;
+    const target = event.target;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+    event.preventDefault();
+    toggleSidebar();
+  });
 
   els.controlBtnSide.addEventListener("click", () => openControl("overview"));
   els.controlBtnTop.addEventListener("click", () => openControl("overview"));
@@ -5191,6 +5410,14 @@ function bindSuggestions(root) {
   });
 }
 
+function applyBrandName(name) {
+  const label = String(name || "").trim();
+  if (!label) return;
+  document.title = `${label} — واجهة عربية`;
+  const brand = document.querySelector(".brand-text strong");
+  if (brand) brand.textContent = label;
+}
+
 async function loadConfig() {
   try {
     const token = getToken();
@@ -5198,6 +5425,7 @@ async function loadConfig() {
     if (res.ok) {
       state.config = await res.json();
       state.models = state.config.models || [];
+      applyBrandName(state.config.appName);
       if (state.config.supervised && els.restartBtn) {
         els.restartBtn.classList.remove("hidden");
       }
@@ -5828,24 +6056,38 @@ function extensionForm(draft) {
   </form>`;
 }
 
+function mcpStatusMeta(server) {
+  if (server.status === "connected") return { label: "متصل", className: "good", icon: "●" };
+  if (server.status === "disconnected") return { label: "غير متصل", className: "bad", icon: "●" };
+  if (server.status === "disabled") return { label: "معطّل", className: "warn", icon: "■" };
+  return { label: "غير مفحوص", className: "muted", icon: "○" };
+}
+
 function renderMcpTab(data) {
   const mcp = data.mcp || { servers: [] };
   const servers = mcp.servers || [];
+  const connected = servers.filter((server) => server.status === "connected").length;
+  const disconnected = servers.filter((server) => server.status === "disconnected").length;
   const list = servers.length
     ? servers
         .map((server) => {
           const args = (server.args || []).map((arg) => escapeHtml(arg)).join(" ");
           const target = server.type === "stdio" ? `${server.command || ""} ${args}`.trim() : server.url || "";
-          return `<div class="cc-item">
+          const status = mcpStatusMeta(server);
+          const checked = server.checkedAt ? new Date(server.checkedAt).toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
+          const diagnoseLabel = server.status === "disconnected" ? "🩺 تشخيص مرة أخرى" : "🩺 تشخيص";
+          return `<div class="cc-item mcp-item ${server.status === "disconnected" ? "mcp-offline" : ""}">
             <div class="cc-item-icon">${server.type === "stdio" ? "💻" : "🌐"}</div>
             <div class="cc-item-main">
               <div class="cc-item-title">${escapeHtml(server.name)}
+                <span class="chip ${status.className} mcp-status"><i>${status.icon}</i> ${status.label}</span>
                 <span class="chip ${server.enabled ? "good" : "bad"}">${server.enabled ? "مفعّل" : "معطّل"}</span>
                 <span class="chip">${escapeHtml(server.type)}</span>
                 <span class="chip">${escapeHtml(server.scope)}</span>
                 <span class="chip accent">${escapeHtml(server.exposure || "codemode")}</span>
               </div>
               <div class="cc-item-desc">${server.description ? escapeHtml(server.description) : `<code dir="ltr">${escapeHtml(target)}</code>`}</div>
+              <div class="cc-item-meta"><span>${escapeHtml(server.statusText || "لم يُفحص بعد")}</span><span>آخر فحص: ${checked}</span>${server.latencyMs != null ? `<span dir="ltr">${server.latencyMs}ms</span>` : ""}</div>
               <div class="cc-chips">
                 ${(server.envKeys || []).length ? `<span class="chip">ENV: ${(server.envKeys || []).map((key) => escapeHtml(key)).join(", ")}</span>` : ""}
                 ${(server.headerKeys || []).length ? `<span class="chip">Headers: ${(server.headerKeys || []).map((key) => escapeHtml(key)).join(", ")}</span>` : ""}
@@ -5853,6 +6095,7 @@ function renderMcpTab(data) {
               </div>
             </div>
             <div class="cc-item-actions">
+              ${server.enabled ? `<button class="btn ${server.status === "disconnected" ? "primary" : ""}" data-action="diagnose-mcp" data-name="${escapeHtml(server.name)}" data-scope="${escapeHtml(server.scope)}">${diagnoseLabel}</button>` : ""}
               <button class="btn" data-action="toggle-mcp" data-name="${escapeHtml(server.name)}" data-scope="${escapeHtml(server.scope)}" data-enabled="${server.enabled ? "0" : "1"}">${server.enabled ? "تعطيل" : "تفعيل"}</button>
             </div>
           </div>`;
@@ -5861,12 +6104,12 @@ function renderMcpTab(data) {
     : `<div class="cc-empty">لا توجد خوادم MCP بعد. أضف خوادمك في <code>~/.pi/agent/mcp.json</code> ثم أعد التحميل.</div>`;
   return `
     <div class="cc-note">
-      <b>خوادم MCP</b> تُقرأ من <code>~/.pi/agent/mcp.json</code> (وخادم المشروع من <code>.pi/mcp.json</code>). فعّل الخادم ثم اضغط <b>«إعادة تحميل»</b>. لا تظهر أدوات MCP إلا للوكلاء الذين يملكون صلاحية <b>أدوات MCP</b>. يدعم Pi النقل <b>Streamable HTTP</b> فقط للخوادم البعيدة، وليس SSE.
+      <b>حالة خوادم MCP</b> — تعرض الواجهة التسجيل والحالة الأخيرة للفحص. زر التشخيص يرسل مصافحة <code>initialize</code> لخادم واحد فقط، ولا يستدعي أدواته أو يغيّر إعداداته. خوادم <code>stdio</code> تُشغّل مؤقتاً عند طلب التشخيص فقط.
     </div>
-    <div class="cc-section">
+    <div class="cc-section mcp-section">
       <div class="cc-section-head">
-        <div><h3 class="cc-section-title">🔗 خوادم MCP (${servers.length})</h3><p class="cc-section-desc">${mcp.enabled || 0} مفعّل · ${escapeHtml(mcp.path || "")}</p></div>
-        <div class="cc-section-actions"><button class="btn" data-action="refresh">↻ تحديث</button></div>
+        <div><h3 class="cc-section-title">🔗 خوادم MCP (${servers.length})</h3><p class="cc-section-desc"><span class="chip good">${connected} متصل</span> <span class="chip ${disconnected ? "bad" : "muted"}">${disconnected} غير متصل</span> <span class="chip">${mcp.enabled || 0} مفعّل</span></p></div>
+        <div class="cc-section-actions"><button class="btn" data-action="refresh">↻ تحديث القائمة</button></div>
       </div>
       <div class="cc-list">${list}</div>
     </div>`;
@@ -6467,6 +6710,22 @@ async function onControlClick(event) {
         const enabled = button.dataset.enabled === "1";
         await apiFetch(`/api/mcp/${encodeURIComponent(name)}`, { method: "PUT", body: { enabled, scope } });
         await afterMutation(enabled ? "تم تفعيل خادم MCP. أعد تحميل الجلسة لتطبيق التغيير." : "تم تعطيل خادم MCP. أعد تحميل الجلسة لتطبيق التغيير.");
+        break;
+      }
+      case "diagnose-mcp": {
+        const name = button.dataset.name;
+        const scope = button.dataset.scope || "user";
+        button.disabled = true;
+        button.textContent = "⏳ جارٍ الفحص…";
+        try {
+          const result = await apiFetch(`/api/mcp/${encodeURIComponent(name)}/diagnose`, { method: "POST", body: { scope } });
+          state.control.overview = { ...(state.control.overview || {}), mcp: result };
+          renderControl();
+          const server = result?.servers?.find((item) => item.name === name && item.scope === scope);
+          toast(server?.status === "connected" ? `✅ ${name}: متصل` : `⚠️ ${name}: ${server?.statusText || "غير متصل"}`, server?.status === "connected" ? "success" : "warn");
+        } finally {
+          button.disabled = false;
+        }
         break;
       }
       case "refresh":
